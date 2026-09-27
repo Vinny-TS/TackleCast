@@ -164,5 +164,12 @@ Each vendor path would follow the same pattern as nvJPEG: dynamic library loadin
 ### Other Future Work
 - Broader hardware validation across more capture card brands
 - UI/menu polish pass based on live feedback
-- Release automation and versioned packaging workflow
 - Audio polish and edge case handling
+
+### Phase 3: Color Space & Color Range Selectors (Complete - v2.2.0)
+- **Color Space**: Auto, BT.709, BT.601, and BT.2020 matrices integrated directly in WGSL shader.
+- **Color Range**: Auto, Limited (16–235), and Full (0–255) decompression ranges.
+- **Real-time uniform buffer update**: Instant response in viewport without restarting DirectShow capture device.
+- **Auto fallback logic**: Resolution & format heuristic (BT.709 for HD+, BT.601 for SD; Limited for NV12, Full for MJPEG).
+- **UI & Overlay**: Dedicated dropdown selectors in Settings menu under Video section, with real-time active space and range readout in detailed overlay pill.
+- **Release**: Packaged and published as TackleCast v2.2.0.
