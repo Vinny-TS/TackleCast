@@ -173,3 +173,9 @@ Each vendor path would follow the same pattern as nvJPEG: dynamic library loadin
 - **Auto fallback logic**: Resolution & format heuristic (BT.709 for HD+, BT.601 for SD; Limited for NV12, Full for MJPEG).
 - **UI & Overlay**: Dedicated dropdown selectors in Settings menu under Video section, with real-time active space and range readout in detailed overlay pill.
 - **Release**: Packaged and published as TackleCast v2.2.0.
+
+### Phase 4: Video Format Selector (Complete)
+- **Video Format**: Dropdown with Auto, MJPEG, NV12, YUY2, UYVY, YUV12 (YUV420P) options.
+- **Graceful DirectShow Negotiation**: Tries requested format first, with safe fallback chain to ensure no black screens.
+- **Active Format Readout**: Detailed overlay displays active pixel format and decode backend (e.g. `1920x1080 | NV12` or `MJPEG (Zero-Copy)`).
+- **Settings Persistence**: Formats saved and restored via `tacklecast_settings.json` with aliases for user convenience.
