@@ -115,6 +115,9 @@ impl UiState {
     pub fn prepare(&mut self, window: &Window, frame: UiFrame<'_>) -> PreparedUi {
         if !self.menu_open {
             self.draft_settings = frame.settings.clone();
+            if self.draft_settings.video_device.is_empty() && !frame.video_devices.is_empty() {
+                self.draft_settings.video_device = frame.video_devices[0].clone();
+            }
         }
 
         let mut raw_input = self.egui_winit.take_egui_input(window);
@@ -287,6 +290,9 @@ fn draw_menu(
                         ui.add_space(8.0);
 
                         section_header(ui, "VIDEO", text_scale);
+                        if draft.video_device.is_empty() && !video_devices.is_empty() {
+                            draft.video_device = video_devices[0].clone();
+                        }
                         let current_video_device = draft.video_device.clone();
                         labeled_combo_string(
                             ui,
@@ -295,7 +301,12 @@ fn draw_menu(
                             video_device_options(video_devices, &current_video_device),
                         );
 
-                        let caps = crate::devices::get_device_capabilities(&draft.video_device);
+                        let active_device = if draft.video_device.is_empty() {
+                            video_devices.first().map(|s| s.as_str()).unwrap_or("")
+                        } else {
+                            draft.video_device.as_str()
+                        };
+                        let caps = crate::devices::get_device_capabilities(active_device);
                         crate::devices::sanitize_draft_settings(draft, &caps);
 
                         let available_resolutions = crate::devices::supported_resolutions(&caps);
@@ -677,19 +688,21 @@ fn overlay_text(overlay: &OverlayInfo) -> Option<String> {
     }
 
     match (overlay.width, overlay.height, overlay.fps) {
-        (Some(width), Some(height), Some(fps)) => Some(if overlay.detailed {
+        (Some(width), Some(height), Some(fps)) => Some({
             let fmt_suffix = overlay
                 .active_format
                 .as_deref()
                 .filter(|s| !s.is_empty())
                 .map(|s| format!(" | {s}"))
                 .unwrap_or_default();
-            format!(
-                "{width}x{height}{fmt_suffix}\n{} | {} {}\n{fps:.1} FPS",
-                overlay.filter, overlay.color_space, overlay.color_range
-            )
-        } else {
-            format!("{width}x{height} | {fps:.1} FPS")
+            if overlay.detailed {
+                format!(
+                    "{width}x{height}{fmt_suffix}\n{} | {} {}\n{fps:.1} FPS",
+                    overlay.filter, overlay.color_space, overlay.color_range
+                )
+            } else {
+                format!("{width}x{height}{fmt_suffix} | {fps:.1} FPS")
+            }
         }),
         _ => Some("Waiting For Video...".to_string()),
     }
@@ -700,4 +713,37 @@ fn spaced_caps(text: &str) -> String {
         .map(|c| c.to_ascii_uppercase().to_string())
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_overlay_text_includes_active_format() {
+        let overlay = OverlayInfo {
+            width: Some(3840),
+            height: Some(2160),
+            fps: Some(60.0),
+            filter: ScaleFilter::Bilinear,
+            color_space: ColorSpace::Auto,
+            color_range: ColorRange::Auto,
+            active_format: Some("MJPEG (SW)".to_string()),
+            show_overlay: true,
+            detailed: false,
+            status_message: None,
+            status_is_alert: false,
+        };
+
+        let text = overlay_text(&overlay);
+        assert_eq!(text, Some("3840x2160 | MJPEG (SW) | 60.0 FPS".to_string()));
+
+        let mut detailed_overlay = overlay;
+        detailed_overlay.detailed = true;
+        let detailed_text = overlay_text(&detailed_overlay);
+        assert_eq!(
+            detailed_text,
+            Some("3840x2160 | MJPEG (SW)\nBilinear | Auto Auto\n60.0 FPS".to_string())
+        );
+    }
 }

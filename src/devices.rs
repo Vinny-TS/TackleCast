@@ -187,6 +187,10 @@ pub struct DeviceFormatCapability {
 }
 
 pub fn query_device_capabilities(device_name: &str) -> Vec<DeviceFormatCapability> {
+    let target = device_name.trim();
+    if target.is_empty() {
+        return Vec::new();
+    }
     unsafe {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
 
@@ -212,7 +216,7 @@ pub fn query_device_capabilities(device_name: &str) -> Vec<DeviceFormatCapabilit
             let name_prop = HSTRING::from("FriendlyName");
             if bag.Read(&name_prop, &mut var, None).is_ok() {
                 let name = format!("{}", var).trim().to_string();
-                if name == device_name {
+                if name.eq_ignore_ascii_case(target) {
                     return query_filter_capabilities(&m);
                 }
             }
@@ -328,16 +332,17 @@ static CAPABILITIES_CACHE: Mutex<Option<HashMap<String, Vec<DeviceFormatCapabili
     Mutex::new(None);
 
 pub fn get_device_capabilities(device_name: &str) -> Vec<DeviceFormatCapability> {
-    if device_name.is_empty() {
+    let target = device_name.trim();
+    if target.is_empty() {
         return Vec::new();
     }
     let mut guard = CAPABILITIES_CACHE.lock().unwrap();
     let map = guard.get_or_insert_with(HashMap::new);
-    if let Some(caps) = map.get(device_name) {
+    if let Some(caps) = map.get(target) {
         return caps.clone();
     }
-    let caps = query_device_capabilities(device_name);
-    map.insert(device_name.to_string(), caps.clone());
+    let caps = query_device_capabilities(target);
+    map.insert(target.to_string(), caps.clone());
     caps
 }
 

@@ -112,7 +112,7 @@ fn main() {
     );
     let _ = unsafe { SetCurrentProcessExplicitAppUserModelID(&HSTRING::from(APP_ID)) };
 
-    let settings = Settings::load();
+    let mut settings = Settings::load();
     info!("loaded settings from {}", settings::settings_path().display());
     let video_devices = devices::enumerate_video_devices();
     let audio_inputs = devices::enumerate_audio_inputs();
@@ -120,6 +120,15 @@ fn main() {
     info!("video devices: {:?}", video_devices);
     info!("audio inputs: {:?}", audio_inputs);
     info!("audio outputs: {:?}", audio_outputs);
+
+    for device in &video_devices {
+        let caps = devices::get_device_capabilities(device);
+        info!("cached {} capabilities for device '{}'", caps.len(), device);
+    }
+
+    if settings.video_device.is_empty() && !video_devices.is_empty() {
+        settings.video_device = video_devices[0].clone();
+    }
 
     let event_loop = EventLoop::<AppEvent>::with_user_event()
         .build()
@@ -176,6 +185,10 @@ impl App {
         audio_outputs: Vec<AudioDevice>,
         event_proxy: EventLoopProxy<AppEvent>,
     ) -> Self {
+        let mut settings = settings;
+        if settings.video_device.is_empty() && !video_devices.is_empty() {
+            settings.video_device = video_devices[0].clone();
+        }
         Self {
             settings,
             test_mode,
