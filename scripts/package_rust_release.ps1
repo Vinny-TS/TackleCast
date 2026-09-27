@@ -68,7 +68,8 @@ try {
         "avutil-*.dll",
         "swresample-*.dll",
         "swscale-*.dll",
-        "avfilter-*.dll"
+        "avfilter-*.dll",
+        "postproc-*.dll"
     )
 
     foreach ($pattern in $dllPatterns) {
