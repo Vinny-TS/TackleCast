@@ -28,7 +28,11 @@ $iconSrc = Join-Path $root "assets\icon.ico"
 $ffmpegDir = $env:FFMPEG_DIR
 
 if ([string]::IsNullOrWhiteSpace($ffmpegDir)) {
-    throw "FFMPEG_DIR is not set. Set it to your FFmpeg root (contains bin/, lib/, include/)."
+    if (Test-Path "C:\ffmpeg") {
+        $ffmpegDir = "C:\ffmpeg"
+    } else {
+        throw "FFMPEG_DIR is not set. Set it to your FFmpeg root (contains bin/, lib/, include/)."
+    }
 }
 
 $ffmpegBin = Join-Path $ffmpegDir "bin"
