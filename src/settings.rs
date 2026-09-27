@@ -18,6 +18,8 @@ pub const MAX_FPS: u32 = 240;
 pub struct Settings {
     #[serde(default)]
     pub video_device: String,
+    #[serde(default = "default_video_format")]
+    pub video_format: VideoFormat,
     #[serde(default = "default_scaling_filter")]
     pub scaling_filter: ScaleFilter,
     #[serde(default = "default_color_space")]
@@ -51,6 +53,49 @@ pub struct CaptureConfig {
     pub fps: u32,
     pub pixel_format: &'static str,
     pub decode_threads: usize,
+}
+
+/// Video / pixel format requested from the capture device.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum VideoFormat {
+    #[default]
+    Auto,
+    #[serde(rename = "mjpeg", alias = "mjpg")]
+    Mjpeg,
+    #[serde(rename = "nv12")]
+    Nv12,
+    #[serde(rename = "yuy2", alias = "yuyv", alias = "yuyv422")]
+    Yuy2,
+    #[serde(rename = "uyvy", alias = "uyvy422")]
+    Uyvy,
+    #[serde(rename = "yuv420p", alias = "yuv12", alias = "yv12", alias = "i420")]
+    Yuv420p,
+}
+
+impl VideoFormat {
+    /// Every variant, in menu order.
+    pub const ALL: [Self; 6] = [
+        Self::Auto,
+        Self::Mjpeg,
+        Self::Nv12,
+        Self::Yuy2,
+        Self::Uyvy,
+        Self::Yuv420p,
+    ];
+}
+
+impl Display for VideoFormat {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Auto => f.write_str("Auto"),
+            Self::Mjpeg => f.write_str("MJPEG"),
+            Self::Nv12 => f.write_str("NV12"),
+            Self::Yuy2 => f.write_str("YUY2"),
+            Self::Uyvy => f.write_str("UYVY"),
+            Self::Yuv420p => f.write_str("YUV12 (YUV420P)"),
+        }
+    }
 }
 
 /// Upscaling filter applied to the video planes in the fragment shader.
@@ -190,6 +235,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             video_device: String::new(),
+            video_format: default_video_format(),
             scaling_filter: default_scaling_filter(),
             color_space: default_color_space(),
             color_range: default_color_range(),
@@ -259,7 +305,7 @@ impl Settings {
     }
 }
 
-pub fn get_capture_config(resolution: &str, fps: u32) -> CaptureConfig {
+pub fn get_capture_config(resolution: &str, fps: u32, video_format: VideoFormat) -> CaptureConfig {
     let (width, height) = match resolution {
         "720p" => (1280, 720),
         "1440p" => (2560, 1440),
@@ -267,22 +313,27 @@ pub fn get_capture_config(resolution: &str, fps: u32) -> CaptureConfig {
         _ => (1920, 1080),
     };
 
-    if fps <= 60 {
-        CaptureConfig {
-            width,
-            height,
-            fps,
-            pixel_format: "nv12",
-            decode_threads: 1,
+    let (pixel_format, decode_threads) = match video_format {
+        VideoFormat::Auto => {
+            if fps <= 60 {
+                ("nv12", 1)
+            } else {
+                ("mjpeg", 4)
+            }
         }
-    } else {
-        CaptureConfig {
-            width,
-            height,
-            fps,
-            pixel_format: "mjpeg",
-            decode_threads: 4,
-        }
+        VideoFormat::Mjpeg => ("mjpeg", 4),
+        VideoFormat::Nv12 => ("nv12", 1),
+        VideoFormat::Yuy2 => ("yuyv422", 1),
+        VideoFormat::Uyvy => ("uyvy422", 1),
+        VideoFormat::Yuv420p => ("yuv420p", 1),
+    };
+
+    CaptureConfig {
+        width,
+        height,
+        fps,
+        pixel_format,
+        decode_threads,
     }
 }
 
@@ -303,6 +354,10 @@ pub fn settings_path() -> PathBuf {
 
 fn default_audio_index() -> i32 {
     -1
+}
+
+fn default_video_format() -> VideoFormat {
+    VideoFormat::Auto
 }
 
 fn default_scaling_filter() -> ScaleFilter {
@@ -366,6 +421,7 @@ mod tests {
         let settings: Settings = serde_json::from_str(json).unwrap();
         assert_eq!(settings.video_device, "ShadowCast 3");
         assert_eq!(settings.scaling_filter, ScaleFilter::Bicubic);
+        assert_eq!(settings.video_format, VideoFormat::Auto);
         assert_eq!(settings.color_space, ColorSpace::Auto);
         assert_eq!(settings.color_range, ColorRange::Auto);
         assert_eq!(settings.audio_input, 15);
@@ -374,6 +430,33 @@ mod tests {
         assert_eq!(settings.fps_mode, "120");
         assert_eq!(settings.get_fps(), 120);
         assert!(settings.show_overlay);
+    }
+
+    #[test]
+    fn video_format_serialization_and_aliases() {
+        let mut settings = Settings::default();
+        settings.video_format = VideoFormat::Yuy2;
+        let json = serde_json::to_string(&settings).unwrap();
+        assert!(json.contains(r#""video_format":"yuy2""#));
+
+        // Test aliases
+        let mjpg: Settings = serde_json::from_str(r#"{"video_format":"mjpg"}"#).unwrap();
+        assert_eq!(mjpg.video_format, VideoFormat::Mjpeg);
+
+        let yuyv: Settings = serde_json::from_str(r#"{"video_format":"yuyv"}"#).unwrap();
+        assert_eq!(yuyv.video_format, VideoFormat::Yuy2);
+
+        let yuyv422: Settings = serde_json::from_str(r#"{"video_format":"yuyv422"}"#).unwrap();
+        assert_eq!(yuyv422.video_format, VideoFormat::Yuy2);
+
+        let yuv12: Settings = serde_json::from_str(r#"{"video_format":"yuv12"}"#).unwrap();
+        assert_eq!(yuv12.video_format, VideoFormat::Yuv420p);
+
+        let yv12: Settings = serde_json::from_str(r#"{"video_format":"yv12"}"#).unwrap();
+        assert_eq!(yv12.video_format, VideoFormat::Yuv420p);
+
+        let i420: Settings = serde_json::from_str(r#"{"video_format":"i420"}"#).unwrap();
+        assert_eq!(i420.video_format, VideoFormat::Yuv420p);
     }
 
     #[test]
@@ -414,14 +497,35 @@ mod tests {
 
     #[test]
     fn capture_config_matches_python_logic() {
-        let nv12 = get_capture_config("1080p", 60);
+        let nv12 = get_capture_config("1080p", 60, VideoFormat::Auto);
         assert_eq!(nv12.pixel_format, "nv12");
         assert_eq!(nv12.decode_threads, 1);
 
-        let mjpeg = get_capture_config("1440p", 120);
+        let mjpeg = get_capture_config("1440p", 120, VideoFormat::Auto);
         assert_eq!(mjpeg.width, 2560);
         assert_eq!(mjpeg.height, 1440);
         assert_eq!(mjpeg.pixel_format, "mjpeg");
         assert_eq!(mjpeg.decode_threads, 4);
+    }
+
+    #[test]
+    fn get_capture_config_explicit_formats() {
+        let mjpeg = get_capture_config("1080p", 60, VideoFormat::Mjpeg);
+        assert_eq!(mjpeg.pixel_format, "mjpeg");
+        assert_eq!(mjpeg.decode_threads, 4);
+
+        let nv12 = get_capture_config("1440p", 120, VideoFormat::Nv12);
+        assert_eq!(nv12.pixel_format, "nv12");
+        assert_eq!(nv12.decode_threads, 1);
+
+        let yuy2 = get_capture_config("1080p", 60, VideoFormat::Yuy2);
+        assert_eq!(yuy2.pixel_format, "yuyv422");
+        assert_eq!(yuy2.decode_threads, 1);
+
+        let uyvy = get_capture_config("1080p", 60, VideoFormat::Uyvy);
+        assert_eq!(uyvy.pixel_format, "uyvy422");
+
+        let yuv420p = get_capture_config("1080p", 60, VideoFormat::Yuv420p);
+        assert_eq!(yuv420p.pixel_format, "yuv420p");
     }
 }

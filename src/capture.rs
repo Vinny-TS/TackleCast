@@ -132,11 +132,12 @@ impl CaptureFrame {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct CaptureStats {
     pub fps: f32,
     pub width: u32,
     pub height: u32,
+    pub format_label: String,
 }
 
 /// Sent once when the capture thread successfully opens a device at settings
@@ -313,7 +314,15 @@ fn run_test_pattern(
         let elapsed = last_stats_at.elapsed();
         if elapsed >= Duration::from_millis(300) {
             let fps = stats_frame_counter as f32 / elapsed.as_secs_f32();
-            let _ = stats_tx.send(CaptureStats { fps, width, height });
+            let format_label = if alternate_formats {
+                "Test (Alt)".to_string()
+            } else {
+                match format {
+                    PixelFormat::Nv12 => "Test (NV12)".to_string(),
+                    PixelFormat::Yuvj422p => "Test (YUV422)".to_string(),
+                }
+            };
+            let _ = stats_tx.send(CaptureStats { fps, width, height, format_label });
             last_stats_at = Instant::now();
             stats_frame_counter = 0;
         }
@@ -384,7 +393,11 @@ fn run_directshow_capture(
                 stats_tx.clone(),
                 event_proxy,
                 #[cfg(feature = "gpu-decode")]
-                shared_gpu_handles.take(),
+                if format_attempt.as_deref().is_some_and(|f| f.eq_ignore_ascii_case("mjpeg")) {
+                    shared_gpu_handles.take()
+                } else {
+                    None
+                },
             ) {
                 Ok(()) => {
                     // Notify if we fell back to different settings
@@ -605,7 +618,12 @@ fn run_directshow_capture_inner(
                         let elapsed = last_stats_at.elapsed();
                         if elapsed >= Duration::from_millis(300) {
                             let fps = stats_frame_counter as f32 / elapsed.as_secs_f32();
-                            let _ = stats_tx.send(CaptureStats { fps, width, height });
+                            let format_label = if is_zero_copy {
+                                "MJPEG (Zero-Copy)".to_string()
+                            } else {
+                                "MJPEG (GPU)".to_string()
+                            };
+                            let _ = stats_tx.send(CaptureStats { fps, width, height, format_label });
                             last_stats_at = Instant::now();
                             stats_frame_counter = 0;
                         }
@@ -668,11 +686,16 @@ fn run_directshow_capture_inner(
         }
 
         while decoder.receive_frame(&mut decoded).is_ok() {
+            let prefer_yuvj422p = requested_fps > 60
+                || matches!(
+                    decoded.format(),
+                    format::Pixel::YUVJ422P | format::Pixel::YUYV422 | format::Pixel::UYVY422
+                );
             let frame = capture_frame_from_video(
                 &decoded,
                 &mut scaler,
                 &mut scaled_frame,
-                requested_fps > 60,
+                prefer_yuvj422p,
             )
                 .map_err(|error| format!("failed to convert decoded frame: {error}"))?;
             let width = frame.width();
@@ -695,7 +718,16 @@ fn run_directshow_capture_inner(
             let elapsed = last_stats_at.elapsed();
             if elapsed >= Duration::from_millis(300) {
                 let fps = stats_frame_counter as f32 / elapsed.as_secs_f32();
-                let _ = stats_tx.send(CaptureStats { fps, width, height });
+                let format_label = match requested_pixel_format {
+                    Some(fmt) if fmt.eq_ignore_ascii_case("mjpeg") => "MJPEG (SW)".to_string(),
+                    Some(fmt) if fmt.eq_ignore_ascii_case("nv12") => "NV12".to_string(),
+                    Some(fmt) if fmt.eq_ignore_ascii_case("yuyv422") => "YUY2".to_string(),
+                    Some(fmt) if fmt.eq_ignore_ascii_case("uyvy422") => "UYVY".to_string(),
+                    Some(fmt) if fmt.eq_ignore_ascii_case("yuv420p") => "YUV12".to_string(),
+                    Some(fmt) => fmt.to_uppercase(),
+                    None => "Auto".to_string(),
+                };
+                let _ = stats_tx.send(CaptureStats { fps, width, height, format_label });
                 last_stats_at = Instant::now();
                 stats_frame_counter = 0;
             }
@@ -1016,5 +1048,16 @@ mod tests {
         assert!(labels.contains(&"auto"));
         let nv12_count = labels.iter().filter(|v| **v == "nv12").count();
         assert_eq!(nv12_count, 1);
+    }
+
+    #[test]
+    fn pixel_format_attempts_custom_format_first() {
+        let attempts = pixel_format_attempts("yuyv422");
+        assert_eq!(attempts[0].as_deref(), Some("yuyv422"));
+        let labels: Vec<_> = attempts.iter().map(|s| s.as_deref().unwrap_or("auto")).collect();
+        assert!(labels.contains(&"yuyv422"));
+        assert!(labels.contains(&"mjpeg"));
+        assert!(labels.contains(&"nv12"));
+        assert!(labels.contains(&"auto"));
     }
 }

@@ -1,7 +1,7 @@
 use crate::devices::AudioDevice;
 use crate::settings::{
-    ColorRange, ColorSpace, ScaleFilter, Settings, FPS_MODE_120, FPS_MODE_30, FPS_MODE_60,
-    FPS_MODE_CUSTOM, MAX_FPS, MIN_FPS,
+    ColorRange, ColorSpace, ScaleFilter, Settings, VideoFormat, FPS_MODE_120, FPS_MODE_30,
+    FPS_MODE_60, FPS_MODE_CUSTOM, MAX_FPS, MIN_FPS,
 };
 use egui::{
     Align, Align2, Button, Checkbox, Color32, ComboBox, CornerRadius, FontId, Frame, Layout,
@@ -39,6 +39,7 @@ pub struct OverlayInfo {
     pub filter: ScaleFilter,
     pub color_space: ColorSpace,
     pub color_range: ColorRange,
+    pub active_format: Option<String>,
     pub show_overlay: bool,
     /// Stack resolution, filter, and FPS over three lines instead of one.
     pub detailed: bool,
@@ -306,11 +307,18 @@ fn draw_menu(
                             fps_mode_combo(&mut columns[1], &mut draft.fps_mode);
                         });
 
-                        scaling_filter_combo(
-                            ui,
-                            "Scaling Filter",
-                            &mut draft.scaling_filter,
-                        );
+                        ui.columns(2, |columns| {
+                            video_format_combo(
+                                &mut columns[0],
+                                "Video Format",
+                                &mut draft.video_format,
+                            );
+                            scaling_filter_combo(
+                                &mut columns[1],
+                                "Scaling Filter",
+                                &mut draft.scaling_filter,
+                            );
+                        });
 
                         ui.columns(2, |columns| {
                             color_space_combo(
@@ -448,6 +456,18 @@ fn labeled_combo_static(
         .show_ui(ui, |ui| {
             for option in options {
                 ui.selectable_value(selected, (*option).to_string(), *option);
+            }
+        });
+}
+
+fn video_format_combo(ui: &mut egui::Ui, label: &str, selected: &mut VideoFormat) {
+    ui.label(RichText::new(label).color(COLOR_TEXT_SECONDARY));
+    ComboBox::from_id_salt(label)
+        .width(ui.available_width())
+        .selected_text(selected.to_string())
+        .show_ui(ui, |ui| {
+            for format in VideoFormat::ALL {
+                ui.selectable_value(selected, format, format.to_string());
             }
         });
 }
@@ -632,8 +652,14 @@ fn overlay_text(overlay: &OverlayInfo) -> Option<String> {
 
     match (overlay.width, overlay.height, overlay.fps) {
         (Some(width), Some(height), Some(fps)) => Some(if overlay.detailed {
+            let fmt_suffix = overlay
+                .active_format
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .map(|s| format!(" | {s}"))
+                .unwrap_or_default();
             format!(
-                "{width}x{height}\n{} | {} {}\n{fps:.1} FPS",
+                "{width}x{height}{fmt_suffix}\n{} | {} {}\n{fps:.1} FPS",
                 overlay.filter, overlay.color_space, overlay.color_range
             )
         } else {

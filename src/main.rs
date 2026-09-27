@@ -22,7 +22,7 @@ use audio::AudioPassthrough;
 use capture::{CaptureConfig, CaptureSource, CaptureStats, CaptureThread, PixelFormat};
 use devices::AudioDevice;
 use render::Renderer;
-use settings::{get_capture_config, Settings};
+use settings::{get_capture_config, Settings, VideoFormat};
 use tracing::{error, info, warn};
 use ui::{OverlayInfo, UiFrame, UiState};
 use windows::core::HSTRING;
@@ -555,7 +555,7 @@ impl ApplicationHandler<AppEvent> for App {
                 "render summary: {:.1} rendered fps, {:.1} uploaded fps, decode fps={:.1}{}",
                 render_fps,
                 upload_fps,
-                self.latest_stats.map(|s| s.fps).unwrap_or(0.0),
+                self.latest_stats.as_ref().map(|s| s.fps).unwrap_or(0.0),
                 gpu_info.as_deref().unwrap_or(""),
             );
             self.render_frame_counter = 0;
@@ -587,6 +587,7 @@ impl App {
         }
 
         let video_changed = old_settings.video_device != self.settings.video_device
+            || old_settings.video_format != self.settings.video_format
             || old_settings.resolution != self.settings.resolution
             || old_settings.fps_mode != self.settings.fps_mode
             || old_settings.custom_fps != self.settings.custom_fps;
@@ -642,13 +643,14 @@ impl App {
         };
 
         OverlayInfo {
-            width: self.latest_stats.map(|stats| stats.width),
-            height: self.latest_stats.map(|stats| stats.height),
-            fps: self.latest_stats.map(|stats| stats.fps),
+            width: self.latest_stats.as_ref().map(|stats| stats.width),
+            height: self.latest_stats.as_ref().map(|stats| stats.height),
+            fps: self.latest_stats.as_ref().map(|stats| stats.fps),
             show_overlay: self.settings.show_overlay && !self.is_minimized,
             filter: self.settings.scaling_filter,
             color_space: self.settings.color_space,
             color_range: self.settings.color_range,
+            active_format: self.latest_stats.as_ref().map(|stats| stats.format_label.clone()),
             detailed: self.settings.detailed_overlay,
             status_message,
             status_is_alert: self.latest_error.is_some() || self.latest_stats.is_none(),
@@ -669,7 +671,11 @@ impl App {
     fn start_capture(&mut self) {
         self.latest_stats = None;
         self.latest_error = None;
-        let capture_config = get_capture_config(&self.settings.resolution, self.settings.get_fps());
+        let capture_config = get_capture_config(
+            &self.settings.resolution,
+            self.settings.get_fps(),
+            self.settings.video_format,
+        );
         if self.test_mode {
             self.start_test_capture(
                 capture_config.width,
@@ -729,10 +735,15 @@ impl App {
     }
 
     fn start_test_capture(&mut self, width: u32, height: u32, fps: u32, reason: &str) {
-        let (alternate_formats, force_format) = match self.test_pattern {
-            TestPatternMode::Alternate => (true, None),
-            TestPatternMode::Nv12 => (false, Some(PixelFormat::Nv12)),
-            TestPatternMode::Yuvj422p => (false, Some(PixelFormat::Yuvj422p)),
+        let (alternate_formats, force_format) = match self.settings.video_format {
+            VideoFormat::Nv12 => (false, Some(PixelFormat::Nv12)),
+            VideoFormat::Mjpeg | VideoFormat::Yuy2 | VideoFormat::Uyvy => (false, Some(PixelFormat::Yuvj422p)),
+            VideoFormat::Yuv420p => (false, Some(PixelFormat::Nv12)),
+            VideoFormat::Auto => match self.test_pattern {
+                TestPatternMode::Alternate => (true, None),
+                TestPatternMode::Nv12 => (false, Some(PixelFormat::Nv12)),
+                TestPatternMode::Yuvj422p => (false, Some(PixelFormat::Yuvj422p)),
+            },
         };
 
         info!("starting test-pattern capture: {}x{} @ {}fps ({reason})", width, height, fps);
