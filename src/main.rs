@@ -358,7 +358,7 @@ impl ApplicationHandler<AppEvent> for App {
         window_id: winit::window::WindowId,
         event: WindowEvent,
     ) {
-        let Some(window) = &self.window else {
+        let Some(window) = self.window.clone() else {
             return;
         };
 
@@ -378,6 +378,7 @@ impl ApplicationHandler<AppEvent> for App {
                             } else {
                                 ui.open_menu(&self.settings);
                             }
+                            window.request_redraw();
                         }
                         if self.ui.as_ref().is_some_and(|ui| ui.is_menu_open()) {
                             self.set_cursor_visible(true);
@@ -399,7 +400,9 @@ impl ApplicationHandler<AppEvent> for App {
         // and goes stale (wrong scale factor after a monitor change, unknown
         // pointer position) if it only sees them some of the time.
         if let Some(ui) = &mut self.ui {
-            ui.on_window_event(window, &event);
+            if ui.on_window_event(&window, &event) && ui.is_menu_open() {
+                window.request_redraw();
+            }
         }
 
         match event {
@@ -416,6 +419,14 @@ impl ApplicationHandler<AppEvent> for App {
             WindowEvent::CursorMoved { .. } => {
                 self.last_cursor_moved = Instant::now();
                 self.set_cursor_visible(true);
+                if self.ui.as_ref().is_some_and(|ui| ui.is_menu_open()) {
+                    window.request_redraw();
+                }
+            }
+            WindowEvent::MouseInput { .. } | WindowEvent::MouseWheel { .. } => {
+                if self.ui.as_ref().is_some_and(|ui| ui.is_menu_open()) {
+                    window.request_redraw();
+                }
             }
             WindowEvent::Resized(size) => {
                 self.is_minimized = size.width == 0 || size.height == 0;
@@ -441,7 +452,7 @@ impl ApplicationHandler<AppEvent> for App {
                 let overlay = self.overlay_info();
                 if let (Some(renderer), Some(ui)) = (&mut self.renderer, &mut self.ui) {
                     let prepared_ui = ui.prepare(
-                        window,
+                        &window,
                         UiFrame {
                             overlay: &overlay,
                             settings: &self.settings,
@@ -454,10 +465,14 @@ impl ApplicationHandler<AppEvent> for App {
                     let toggle_fullscreen = prepared_ui.output.toggle_fullscreen;
                     let exit_requested = prepared_ui.output.exit_requested;
                     let apply_settings = prepared_ui.output.apply_settings.clone();
+                    let request_repaint = prepared_ui.output.request_repaint;
                     if let Err(error) = renderer.render(Some(prepared_ui)) {
                         error!("render error: {error}");
                     }
                     self.render_frame_counter += 1;
+                    if request_repaint {
+                        window.request_redraw();
+                    }
                     if toggle_fullscreen {
                         self.toggle_fullscreen();
                     }

@@ -66,6 +66,7 @@ pub struct UiOutput {
     pub apply_settings: Option<Settings>,
     pub toggle_fullscreen: bool,
     pub exit_requested: bool,
+    pub request_repaint: bool,
 }
 
 impl UiState {
@@ -151,6 +152,8 @@ impl UiState {
         if ui_output.apply_settings.is_some() {
             self.menu_open = false;
         }
+
+        ui_output.request_repaint = self.menu_open || self.egui_ctx.has_requested_repaint();
 
         let pixels_per_point = egui_winit::pixels_per_point(&self.egui_ctx, window);
         let clipped_primitives = self.egui_ctx.tessellate(full_output.shapes, pixels_per_point);
@@ -300,6 +303,9 @@ fn draw_menu(
                             &mut draft.video_device,
                             video_device_options(video_devices, &current_video_device),
                         );
+                        if draft.video_device != current_video_device {
+                            ctx.request_repaint();
+                        }
 
                         let active_device = if draft.video_device.is_empty() {
                             video_devices.first().map(|s| s.as_str()).unwrap_or("")
@@ -310,13 +316,8 @@ fn draw_menu(
                         crate::devices::sanitize_draft_settings(draft, &caps);
 
                         let available_resolutions = crate::devices::supported_resolutions(&caps);
-                        let available_fps = crate::devices::supported_fps_modes(&caps, &draft.resolution);
-                        let available_formats = crate::devices::supported_video_formats(
-                            &caps,
-                            &draft.resolution,
-                            draft.get_fps(),
-                        );
-                        let max_res_fps = crate::devices::max_fps_for_resolution(&caps, &draft.resolution);
+                        let prev_resolution = draft.resolution.clone();
+                        let prev_fps_mode = draft.fps_mode.clone();
 
                         ui.columns(2, |columns| {
                             labeled_combo_static(
@@ -325,8 +326,21 @@ fn draw_menu(
                                 &mut draft.resolution,
                                 &available_resolutions,
                             );
+                            let available_fps = crate::devices::supported_fps_modes(&caps, &draft.resolution);
                             fps_mode_combo(&mut columns[1], &mut draft.fps_mode, &available_fps);
                         });
+
+                        if draft.resolution != prev_resolution || draft.fps_mode != prev_fps_mode {
+                            crate::devices::sanitize_draft_settings(draft, &caps);
+                            ctx.request_repaint();
+                        }
+
+                        let available_formats = crate::devices::supported_video_formats(
+                            &caps,
+                            &draft.resolution,
+                            draft.get_fps(),
+                        );
+                        let max_res_fps = crate::devices::max_fps_for_resolution(&caps, &draft.resolution);
 
                         ui.columns(2, |columns| {
                             video_format_combo(
@@ -745,5 +759,72 @@ mod tests {
             detailed_text,
             Some("3840x2160 | MJPEG (SW)\nBilinear | Auto Auto\n60.0 FPS".to_string())
         );
+    }
+
+    #[test]
+    fn test_menu_resolution_switch() {
+        let ctx = egui::Context::default();
+        let mut draft = Settings::default();
+        draft.video_device = "VEDO-VDV66003".to_string();
+        draft.resolution = "1080p".to_string();
+        draft.fps_mode = "60".to_string();
+        draft.video_format = VideoFormat::Auto;
+        let video_devices = vec!["VEDO-VDV66003".to_string()];
+        let mut output = UiOutput::default();
+
+        let caps = crate::devices::get_device_capabilities(&draft.video_device);
+        if caps.is_empty() {
+            // If running in an environment without the physical device, skip device-specific test
+            return;
+        }
+
+        // Frame 1: 1080p60 -> all formats supported by hardware should be available
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            draw_menu(&ctx, &mut draft, &video_devices, &[], &[], false, &mut output);
+        });
+        let fmts_frame1 = crate::devices::supported_video_formats(&caps, &draft.resolution, draft.get_fps());
+        assert!(fmts_frame1.contains(&VideoFormat::Auto));
+        assert!(fmts_frame1.contains(&VideoFormat::Mjpeg));
+        assert!(fmts_frame1.contains(&VideoFormat::Nv12));
+        assert!(fmts_frame1.contains(&VideoFormat::Yuy2));
+        assert!(fmts_frame1.contains(&VideoFormat::Yuv420p));
+
+        // Frame 2: Switch to 4K60 -> only Auto and MJPEG available
+        draft.resolution = "4K".to_string();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            draw_menu(&ctx, &mut draft, &video_devices, &[], &[], false, &mut output);
+        });
+        let fmts_frame2 = crate::devices::supported_video_formats(&caps, &draft.resolution, draft.get_fps());
+        assert_eq!(fmts_frame2, vec![VideoFormat::Auto, VideoFormat::Mjpeg]);
+
+        // Frame 3: Switch back to 1080p60 -> all formats MUST reappear!
+        draft.resolution = "1080p".to_string();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            draw_menu(&ctx, &mut draft, &video_devices, &[], &[], false, &mut output);
+        });
+        let fmts_frame3 = crate::devices::supported_video_formats(&caps, &draft.resolution, draft.get_fps());
+        assert_eq!(fmts_frame3, fmts_frame1);
+        assert!(fmts_frame3.contains(&VideoFormat::Auto));
+        assert!(fmts_frame3.contains(&VideoFormat::Mjpeg));
+        assert!(fmts_frame3.contains(&VideoFormat::Nv12));
+        assert!(fmts_frame3.contains(&VideoFormat::Yuy2));
+        assert!(fmts_frame3.contains(&VideoFormat::Yuv420p));
+
+        // Frame 4: Test format fallback when switching from 1080p NV12 to 4K and back
+        draft.video_format = VideoFormat::Nv12;
+        draft.resolution = "4K".to_string();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            draw_menu(&ctx, &mut draft, &video_devices, &[], &[], false, &mut output);
+        });
+        // Since NV12 is only supported up to 30fps at 4K on VEDO-VDV66003, at 60fps it must fall back to Auto
+        assert_eq!(draft.video_format, VideoFormat::Auto);
+
+        // Frame 5: Switch back to 1080p and select NV12 again
+        draft.resolution = "1080p".to_string();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            draw_menu(&ctx, &mut draft, &video_devices, &[], &[], false, &mut output);
+        });
+        let fmts_frame5 = crate::devices::supported_video_formats(&caps, &draft.resolution, draft.get_fps());
+        assert!(fmts_frame5.contains(&VideoFormat::Nv12));
     }
 }
