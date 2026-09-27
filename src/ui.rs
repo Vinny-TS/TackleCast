@@ -1,5 +1,8 @@
 use crate::devices::AudioDevice;
-use crate::settings::{Settings, ScaleFilter, FPS_MODE_30, FPS_MODE_120, FPS_MODE_60, FPS_MODE_CUSTOM, MAX_FPS, MIN_FPS};
+use crate::settings::{
+    ColorRange, ColorSpace, ScaleFilter, Settings, FPS_MODE_120, FPS_MODE_30, FPS_MODE_60,
+    FPS_MODE_CUSTOM, MAX_FPS, MIN_FPS,
+};
 use egui::{
     Align, Align2, Button, Checkbox, Color32, ComboBox, CornerRadius, FontId, Frame, Layout,
     Margin, RichText, Slider, Stroke,
@@ -34,6 +37,8 @@ pub struct OverlayInfo {
     pub height: Option<u32>,
     pub fps: Option<f32>,
     pub filter: ScaleFilter,
+    pub color_space: ColorSpace,
+    pub color_range: ColorRange,
     pub show_overlay: bool,
     /// Stack resolution, filter, and FPS over three lines instead of one.
     pub detailed: bool,
@@ -304,8 +309,21 @@ fn draw_menu(
                         scaling_filter_combo(
                             ui,
                             "Scaling Filter",
-                            &mut draft.scaling_filter
+                            &mut draft.scaling_filter,
                         );
+
+                        ui.columns(2, |columns| {
+                            color_space_combo(
+                                &mut columns[0],
+                                "Color Space",
+                                &mut draft.color_space,
+                            );
+                            color_range_combo(
+                                &mut columns[1],
+                                "Color Range",
+                                &mut draft.color_range,
+                            );
+                        });
 
                         if draft.fps_mode == FPS_MODE_CUSTOM {
                             labeled_custom_fps(ui, draft);
@@ -442,6 +460,30 @@ fn scaling_filter_combo(ui: &mut egui::Ui, label: &str, selected: &mut ScaleFilt
         .show_ui(ui, |ui| {
             for filter in ScaleFilter::ALL {
                 ui.selectable_value(selected, filter, filter.to_string());
+            }
+        });
+}
+
+fn color_space_combo(ui: &mut egui::Ui, label: &str, selected: &mut ColorSpace) {
+    ui.label(RichText::new(label).color(COLOR_TEXT_SECONDARY));
+    ComboBox::from_id_salt(label)
+        .width(ui.available_width())
+        .selected_text(selected.to_string())
+        .show_ui(ui, |ui| {
+            for space in ColorSpace::ALL {
+                ui.selectable_value(selected, space, space.to_string());
+            }
+        });
+}
+
+fn color_range_combo(ui: &mut egui::Ui, label: &str, selected: &mut ColorRange) {
+    ui.label(RichText::new(label).color(COLOR_TEXT_SECONDARY));
+    ComboBox::from_id_salt(label)
+        .width(ui.available_width())
+        .selected_text(selected.to_string())
+        .show_ui(ui, |ui| {
+            for range in ColorRange::ALL {
+                ui.selectable_value(selected, range, range.to_string());
             }
         });
 }
@@ -590,7 +632,10 @@ fn overlay_text(overlay: &OverlayInfo) -> Option<String> {
 
     match (overlay.width, overlay.height, overlay.fps) {
         (Some(width), Some(height), Some(fps)) => Some(if overlay.detailed {
-            format!("{width}x{height}\n{}\n{fps:.1} FPS", overlay.filter)
+            format!(
+                "{width}x{height}\n{} | {} {}\n{fps:.1} FPS",
+                overlay.filter, overlay.color_space, overlay.color_range
+            )
         } else {
             format!("{width}x{height} | {fps:.1} FPS")
         }),

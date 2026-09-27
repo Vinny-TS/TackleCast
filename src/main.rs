@@ -314,6 +314,8 @@ impl ApplicationHandler<AppEvent> for App {
         let renderer = match pollster::block_on(Renderer::new(
             window.clone(),
             self.settings.scaling_filter,
+            self.settings.color_space,
+            self.settings.color_range,
         )) {
             Ok(renderer) => renderer,
             Err(error) => {
@@ -594,6 +596,8 @@ impl App {
             || old_settings.audio_output != self.settings.audio_output;
 
         let scaling_changed = old_settings.scaling_filter != self.settings.scaling_filter;
+        let color_changed = old_settings.color_space != self.settings.color_space
+            || old_settings.color_range != self.settings.color_range;
 
         if video_changed {
             if let Some(capture) = &mut self.capture {
@@ -614,6 +618,18 @@ impl App {
                 renderer.set_scale_filter(self.settings.scaling_filter);
             }
         }
+
+        if color_changed {
+            if let Some(renderer) = &mut self.renderer {
+                renderer.set_color_settings(self.settings.color_space, self.settings.color_range);
+            }
+        }
+
+        if scaling_changed || color_changed {
+            if let Some(window) = &self.window {
+                window.request_redraw();
+            }
+        }
     }
 
     fn overlay_info(&self) -> OverlayInfo {
@@ -631,6 +647,8 @@ impl App {
             fps: self.latest_stats.map(|stats| stats.fps),
             show_overlay: self.settings.show_overlay && !self.is_minimized,
             filter: self.settings.scaling_filter,
+            color_space: self.settings.color_space,
+            color_range: self.settings.color_range,
             detailed: self.settings.detailed_overlay,
             status_message,
             status_is_alert: self.latest_error.is_some() || self.latest_stats.is_none(),

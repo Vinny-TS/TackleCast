@@ -4,6 +4,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::capture::PixelFormat;
+
 pub const FPS_MODE_30: &str = "30";
 pub const FPS_MODE_60: &str = "60";
 pub const FPS_MODE_120: &str = "120";
@@ -18,6 +20,10 @@ pub struct Settings {
     pub video_device: String,
     #[serde(default = "default_scaling_filter")]
     pub scaling_filter: ScaleFilter,
+    #[serde(default = "default_color_space")]
+    pub color_space: ColorSpace,
+    #[serde(default = "default_color_range")]
+    pub color_range: ColorRange,
     #[serde(default = "default_audio_index")]
     pub audio_input: i32,
     #[serde(default = "default_audio_index")]
@@ -81,11 +87,112 @@ impl Display for ScaleFilter {
     }
 }
 
+/// Color space matrix applied in the fragment shader.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ColorSpace {
+    Auto,
+    #[serde(rename = "rec709")]
+    Rec709,
+    #[serde(rename = "bt601")]
+    Bt601,
+    #[serde(rename = "bt2020")]
+    Bt2020,
+}
+
+impl ColorSpace {
+    /// Resolves `Auto` into a concrete color space based on resolution.
+    /// Standard HD/FHD/QHD/UHD (>= 720p) uses Rec.709; SD (< 720p) uses BT.601.
+    pub fn resolve(self, _width: u32, height: u32) -> Self {
+        match self {
+            Self::Auto => {
+                if height >= 720 {
+                    Self::Rec709
+                } else {
+                    Self::Bt601
+                }
+            }
+            other => other,
+        }
+    }
+
+    /// The `color_space` uniform value the shader branches on.
+    /// Must stay in step with `VIDEO_SHADER`.
+    pub fn as_u32(self) -> u32 {
+        match self {
+            Self::Rec709 | Self::Auto => 0,
+            Self::Bt601 => 1,
+            Self::Bt2020 => 2,
+        }
+    }
+
+    /// Every variant, in menu order.
+    pub const ALL: [Self; 4] = [Self::Auto, Self::Rec709, Self::Bt601, Self::Bt2020];
+}
+
+impl Display for ColorSpace {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Auto => f.write_str("Auto"),
+            Self::Rec709 => f.write_str("Rec. 709"),
+            Self::Bt601 => f.write_str("BT.601"),
+            Self::Bt2020 => f.write_str("BT.2020"),
+        }
+    }
+}
+
+/// Color range (quantization range) applied in the fragment shader.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ColorRange {
+    Auto,
+    Limited,
+    Full,
+}
+
+impl ColorRange {
+    /// Resolves `Auto` into a concrete range based on pixel format.
+    /// NV12 defaults to Limited range (16-235); MJPEG / YUVJ422P defaults to Full range (0-255).
+    pub fn resolve(self, format: PixelFormat) -> Self {
+        match self {
+            Self::Auto => match format {
+                PixelFormat::Nv12 => Self::Limited,
+                PixelFormat::Yuvj422p => Self::Full,
+            },
+            other => other,
+        }
+    }
+
+    /// The `color_range` uniform value the shader branches on.
+    /// Must stay in step with `VIDEO_SHADER`.
+    pub fn as_u32(self) -> u32 {
+        match self {
+            Self::Limited | Self::Auto => 0,
+            Self::Full => 1,
+        }
+    }
+
+    /// Every variant, in menu order.
+    pub const ALL: [Self; 3] = [Self::Auto, Self::Limited, Self::Full];
+}
+
+impl Display for ColorRange {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Auto => f.write_str("Auto"),
+            Self::Limited => f.write_str("Limited (16-235)"),
+            Self::Full => f.write_str("Full (0-255)"),
+        }
+    }
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
             video_device: String::new(),
             scaling_filter: default_scaling_filter(),
+            color_space: default_color_space(),
+            color_range: default_color_range(),
             audio_input: default_audio_index(),
             audio_output: default_audio_index(),
             resolution: default_resolution(),
@@ -202,6 +309,14 @@ fn default_scaling_filter() -> ScaleFilter {
     ScaleFilter::Bilinear
 }
 
+fn default_color_space() -> ColorSpace {
+    ColorSpace::Auto
+}
+
+fn default_color_range() -> ColorRange {
+    ColorRange::Auto
+}
+
 fn default_resolution() -> String {
     "1080p".to_string()
 }
@@ -251,12 +366,50 @@ mod tests {
         let settings: Settings = serde_json::from_str(json).unwrap();
         assert_eq!(settings.video_device, "ShadowCast 3");
         assert_eq!(settings.scaling_filter, ScaleFilter::Bicubic);
+        assert_eq!(settings.color_space, ColorSpace::Auto);
+        assert_eq!(settings.color_range, ColorRange::Auto);
         assert_eq!(settings.audio_input, 15);
         assert_eq!(settings.audio_output, 12);
         assert_eq!(settings.resolution, "1440p");
         assert_eq!(settings.fps_mode, "120");
         assert_eq!(settings.get_fps(), 120);
         assert!(settings.show_overlay);
+    }
+
+    #[test]
+    fn color_space_and_range_serialize() {
+        let mut settings = Settings::default();
+        settings.color_space = ColorSpace::Rec709;
+        settings.color_range = ColorRange::Full;
+        let json = serde_json::to_string(&settings).unwrap();
+        assert!(json.contains(r#""color_space":"rec709""#));
+        assert!(json.contains(r#""color_range":"full""#));
+
+        let decoded: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.color_space, ColorSpace::Rec709);
+        assert_eq!(decoded.color_range, ColorRange::Full);
+    }
+
+    #[test]
+    fn color_space_resolve_auto() {
+        assert_eq!(ColorSpace::Auto.resolve(1920, 1080), ColorSpace::Rec709);
+        assert_eq!(ColorSpace::Auto.resolve(1280, 720), ColorSpace::Rec709);
+        assert_eq!(ColorSpace::Auto.resolve(2560, 1440), ColorSpace::Rec709);
+        assert_eq!(ColorSpace::Auto.resolve(3840, 2160), ColorSpace::Rec709);
+        assert_eq!(ColorSpace::Auto.resolve(640, 480), ColorSpace::Bt601);
+
+        assert_eq!(ColorSpace::Bt601.resolve(1920, 1080), ColorSpace::Bt601);
+        assert_eq!(ColorSpace::Bt2020.resolve(1920, 1080), ColorSpace::Bt2020);
+        assert_eq!(ColorSpace::Rec709.resolve(640, 480), ColorSpace::Rec709);
+    }
+
+    #[test]
+    fn color_range_resolve_auto() {
+        assert_eq!(ColorRange::Auto.resolve(PixelFormat::Nv12), ColorRange::Limited);
+        assert_eq!(ColorRange::Auto.resolve(PixelFormat::Yuvj422p), ColorRange::Full);
+
+        assert_eq!(ColorRange::Limited.resolve(PixelFormat::Yuvj422p), ColorRange::Limited);
+        assert_eq!(ColorRange::Full.resolve(PixelFormat::Nv12), ColorRange::Full);
     }
 
     #[test]

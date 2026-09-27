@@ -75,6 +75,9 @@ Eliminates all CPU-side data movement for the GPU decode path. Three-tier fallba
 ### Settings Menu (30/60/120/Custom FPS)
 - Frame rate dropdown: 30 FPS, 60 FPS, 120 FPS, Custom (30-240)
 - Resolution dropdown: 720p, 1080p, 1440p, 4K
+- Scaling filter dropdown: Bilinear, Bicubic, Lanczos
+- Color space dropdown: Auto, Rec. 709, BT.601, BT.2020
+- Color range dropdown: Auto, Limited (16-235), Full (0-255)
 - Video device, audio input/output, volume slider
 - Fullscreen toggle, FPS overlay toggle
 - Exit button
@@ -98,8 +101,12 @@ Tested with ShadowCast 3 with zero-copy pipeline:
 - **60fps NV12 works perfectly** on this hardware — zero decode overhead and ~330 MB/s data rate.
 - **RTX 3050 laptop has PCIe 4.0 x4** (half the bandwidth of desktop x16), which was the bottleneck before zero-copy.
 
-### Color Range Mismatch Between NV12 and MJPEG Modes (TODO)
-At 60fps the capture card sends NV12 (limited range YUV, 16-235). At 120fps it sends MJPEG which decodes to Yuvj422p (full range YUV, 0-255 — the "j" means JPEG/full range). The YUV-to-RGB shader currently treats both the same, causing colors to look duller in MJPEG/120fps mode compared to NV12/60fps mode. Fix: pass the pixel format through to the shader and apply the correct YUV-to-RGB matrix for each range (BT.601 limited vs full).
+### Color Range and Color Space Selection (Completed)
+Resolved the color range mismatch between NV12 and MJPEG modes and added full color space matrix transformations:
+- In WGSL shader: decoupled range decompression (Limited 16-235 vs Full 0-255) from color space matrix transformation (Rec. 709, BT.601, BT.2020).
+- In UI settings: interactive dropdowns for Color Space and Color Range.
+- Smart Auto defaults: NV12 -> Limited, MJPEG/YUVJ422P -> Full; >= 720p -> Rec. 709, < 720p -> BT.601.
+- Immediate real-time application in shader uniforms without capture thread restart.
 
 ### ShadowCast 2 Pro: Thermal Throttling at 1440p@120 MJPEG
 The ShadowCast 2 Pro's internal MJPEG encoder thermally throttles under sustained 1440p@120fps load. Confirmed via frame arrival timing diagnostics:
