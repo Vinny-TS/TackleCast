@@ -193,6 +193,15 @@ the standard space and range based on capture format and resolution (e.g. BT.709
 limited for HD/4K NV12, full for MJPEG). You can override them to match your
 source console or capture card signal.
 
+Video formats and dynamic hardware filtering
+--------------------------------------------
+Settings includes a Video Format selector (Auto, MJPEG, NV12, YUY2, UYVY,
+YUV12/YUV420P). TackleCast dynamically probes your capture device's DirectShow
+pin capabilities, automatically filtering the Resolution, Frame Rate, and Video
+Format dropdowns to only display options genuinely supported by your hardware
+at the active configuration. Auto-sanitization ensures settings stay valid if
+you change resolution or frame rate.
+
 If something goes wrong
 -----------------------
 - Log files are in the logs\ folder, newest last. They record the negotiated
