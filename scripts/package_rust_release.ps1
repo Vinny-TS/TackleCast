@@ -1,7 +1,8 @@
 param(
     [string]$PackageName = "TackleCast-Rust",
     [switch]$Zip,
-    [switch]$SkipGpuDlls
+    [switch]$SkipGpuDlls,
+    [string]$CudaDllDir
 )
 
 Set-StrictMode -Version Latest
@@ -85,6 +86,9 @@ try {
     $gpuDllsCopied = @()
     if (-not $SkipGpuDlls) {
         $searchDirs = New-Object System.Collections.Generic.List[string]
+        if ($CudaDllDir) {
+            $searchDirs.Add($CudaDllDir)
+        }
         if ($env:CUDA_PATH) {
             $searchDirs.Add((Join-Path $env:CUDA_PATH "bin\x64"))
             $searchDirs.Add((Join-Path $env:CUDA_PATH "bin"))
@@ -98,6 +102,15 @@ try {
                     $searchDirs.Add((Join-Path $_.FullName "bin\x64"))
                     $searchDirs.Add((Join-Path $_.FullName "bin"))
                 }
+        }
+
+        # Also search parent/ancestor folders for any existing TackleCast release folders with CUDA DLLs
+        $ancestor = Split-Path -Path $root -Parent
+        for ($i = 0; $i -lt 3; $i++) {
+            if (-not $ancestor -or -not (Test-Path -LiteralPath $ancestor)) { break }
+            Get-ChildItem -LiteralPath $ancestor -Directory -Filter "TackleCast*" -ErrorAction SilentlyContinue |
+                ForEach-Object { $searchDirs.Add($_.FullName) }
+            $ancestor = Split-Path -Path $ancestor -Parent
         }
 
         foreach ($pattern in @("nvjpeg64_*.dll", "cudart64_*.dll")) {
@@ -171,6 +184,14 @@ Scaling filters
 Settings has a Scaling Filter option: Bilinear, Bicubic, or Lanczos. It only
 affects the image when the window is larger than the capture resolution. Tick
 "Include Scaling Filter In Overlay" to see which one is live while comparing.
+
+Color space and range
+---------------------
+Settings includes Color Space (Auto, BT.709, BT.601, BT.2020) and Color Range
+(Auto, Limited, Full) options under the Video section. By default, Auto selects
+the standard space and range based on capture format and resolution (e.g. BT.709
+limited for HD/4K NV12, full for MJPEG). You can override them to match your
+source console or capture card signal.
 
 If something goes wrong
 -----------------------
