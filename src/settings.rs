@@ -315,10 +315,12 @@ pub fn get_capture_config(resolution: &str, fps: u32, video_format: VideoFormat)
 
     let (pixel_format, decode_threads) = match video_format {
         VideoFormat::Auto => {
-            if fps <= 60 {
-                ("nv12", 1)
-            } else {
+            // For 4K @ >30fps, USB capture devices cannot transfer uncompressed NV12 due to USB 3.0 bandwidth limits.
+            // For 1440p @ >60fps, MJPEG is also required.
+            if (resolution == "4K" && fps > 30) || (resolution == "1440p" && fps > 60) || fps > 120 {
                 ("mjpeg", 4)
+            } else {
+                ("nv12", 1)
             }
         }
         VideoFormat::Mjpeg => ("mjpeg", 4),
@@ -527,5 +529,29 @@ mod tests {
 
         let yuv420p = get_capture_config("1080p", 60, VideoFormat::Yuv420p);
         assert_eq!(yuv420p.pixel_format, "yuv420p");
+    }
+
+    #[test]
+    fn test_smart_auto_resolution() {
+        // 4K @ 60 FPS with Auto must pick MJPEG
+        let cfg_4k60 = get_capture_config("4K", 60, VideoFormat::Auto);
+        assert_eq!(cfg_4k60.pixel_format, "mjpeg");
+        assert_eq!(cfg_4k60.decode_threads, 4);
+
+        // 4K @ 30 FPS with Auto can use NV12
+        let cfg_4k30 = get_capture_config("4K", 30, VideoFormat::Auto);
+        assert_eq!(cfg_4k30.pixel_format, "nv12");
+
+        // 1080p @ 60 FPS with Auto uses NV12
+        let cfg_1080p60 = get_capture_config("1080p", 60, VideoFormat::Auto);
+        assert_eq!(cfg_1080p60.pixel_format, "nv12");
+
+        // 1080p @ 120 FPS with Auto uses NV12
+        let cfg_1080p120 = get_capture_config("1080p", 120, VideoFormat::Auto);
+        assert_eq!(cfg_1080p120.pixel_format, "nv12");
+
+        // 1440p @ 120 FPS with Auto must use MJPEG
+        let cfg_1440p120 = get_capture_config("1440p", 120, VideoFormat::Auto);
+        assert_eq!(cfg_1440p120.pixel_format, "mjpeg");
     }
 }

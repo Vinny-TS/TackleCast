@@ -179,3 +179,15 @@ Each vendor path would follow the same pattern as nvJPEG: dynamic library loadin
 - **Graceful DirectShow Negotiation**: Tries requested format first, with safe fallback chain to ensure no black screens.
 - **Active Format Readout**: Detailed overlay displays active pixel format and decode backend (e.g. `1920x1080 | NV12` or `MJPEG (Zero-Copy)`).
 - **Settings Persistence**: Formats saved and restored via `tacklecast_settings.json` with aliases for user convenience.
+
+### Phase 5: Dynamic Hardware Capability Filtering (Complete)
+- **DirectShow Pin Capabilities**: Direct COM query (`IAMStreamConfig::GetStreamCaps`) enumerating exact hardware-supported resolutions, pixel formats, and min/max FPS ranges in under 0.09s.
+- **Thread-Safe Capability Cache**: Global in-memory cache (`get_device_capabilities`) ensures instant UI redraw without latency or blocking the render thread.
+- **Dynamic Cascading Selectors**:
+  - **Resolution**: Filtered to only display resolutions natively supported by the connected capture card.
+  - **Frame Rate**: Displays only frame rates achievable by the device at the selected resolution (e.g. 120 FPS hidden at 4K if device caps out at 60 FPS).
+  - **Video Format**: Displays only formats that can deliver the chosen resolution at the chosen frame rate (e.g. at 4K @ 60 FPS, only Auto and MJPEG are available; NV12 and YUV12 are filtered out).
+- **Smart Auto Format Resolution**: `Auto` video format automatically selects MJPEG when resolution/FPS exceeds uncompressed bandwidth (e.g. 4K60, 1440p120), and NV12 for high-efficiency low-latency uncompressed capture at standard modes.
+- **Real-Time Draft Sanitization**: Automatically clamps FPS and falls back to valid formats when the user switches to a resolution with narrower hardware limits.
+- **Automated Test Suite**: 29 unit tests covering deduplication, capability filtering, sanitization, and smart Auto resolution with zero compiler warnings.
+

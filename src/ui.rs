@@ -1,7 +1,7 @@
 use crate::devices::AudioDevice;
 use crate::settings::{
     ColorRange, ColorSpace, ScaleFilter, Settings, VideoFormat, FPS_MODE_120, FPS_MODE_30,
-    FPS_MODE_60, FPS_MODE_CUSTOM, MAX_FPS, MIN_FPS,
+    FPS_MODE_CUSTOM, MAX_FPS, MIN_FPS,
 };
 use egui::{
     Align, Align2, Button, Checkbox, Color32, ComboBox, CornerRadius, FontId, Frame, Layout,
@@ -22,8 +22,6 @@ const COLOR_MENU_BORDER: Color32 = Color32::from_rgb(0x1A, 0x2A, 0x50);
 const COLOR_DIM_OVERLAY: Color32 = Color32::from_black_alpha(120);
 const COLOR_PILL_BG: Color32 = Color32::from_black_alpha(180);
 const COLOR_EXIT_BG: Color32 = Color32::from_rgb(0x3A, 0x10, 0x20);
-
-const RESOLUTION_OPTIONS: &[&str] = &["720p", "1080p", "1440p", "4K"];
 
 pub struct UiState {
     egui_ctx: egui::Context,
@@ -173,23 +171,23 @@ fn configure_style(ctx: &egui::Context) {
     style.visuals.override_text_color = Some(COLOR_TEXT_PRIMARY);
     style.visuals.panel_fill = Color32::TRANSPARENT;
     style.visuals.window_fill = menu_background();
-    style.visuals.window_stroke = Stroke::new(1.0, COLOR_MENU_BORDER);
+    style.visuals.window_stroke = Stroke::new(1.0_f32, COLOR_MENU_BORDER);
     style.visuals.window_corner_radius = CornerRadius::same(12);
     style.visuals.menu_corner_radius = CornerRadius::same(12);
     style.visuals.widgets.noninteractive.bg_fill = COLOR_PANEL_BG;
-    style.visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, COLOR_BORDER);
+    style.visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, COLOR_BORDER);
     style.visuals.widgets.noninteractive.fg_stroke.color = COLOR_TEXT_PRIMARY;
     style.visuals.widgets.inactive.bg_fill = COLOR_PANEL_BG;
-    style.visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, COLOR_BORDER);
+    style.visuals.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, COLOR_BORDER);
     style.visuals.widgets.inactive.fg_stroke.color = COLOR_TEXT_PRIMARY;
     style.visuals.widgets.hovered.bg_fill = COLOR_PANEL_BG;
-    style.visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, COLOR_ACCENT);
+    style.visuals.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, COLOR_ACCENT);
     style.visuals.widgets.hovered.fg_stroke.color = COLOR_TEXT_PRIMARY;
     style.visuals.widgets.active.bg_fill = COLOR_PANEL_BG;
-    style.visuals.widgets.active.bg_stroke = Stroke::new(1.0, COLOR_ACCENT);
+    style.visuals.widgets.active.bg_stroke = Stroke::new(1.0_f32, COLOR_ACCENT);
     style.visuals.widgets.active.fg_stroke.color = COLOR_TEXT_PRIMARY;
     style.visuals.selection.bg_fill = COLOR_ACCENT;
-    style.visuals.selection.stroke = Stroke::new(1.0, COLOR_ACCENT);
+    style.visuals.selection.stroke = Stroke::new(1.0_f32, COLOR_ACCENT);
     style.visuals.slider_trailing_fill = true;
     style.spacing.item_spacing = egui::vec2(10.0, 10.0);
     style.spacing.button_padding = egui::vec2(12.0, 8.0);
@@ -269,7 +267,7 @@ fn draw_menu(
         .show(ctx, |ui| {
             Frame::new()
                 .fill(menu_background())
-                .stroke(Stroke::new(1.0, COLOR_MENU_BORDER))
+                .stroke(Stroke::new(1.0_f32, COLOR_MENU_BORDER))
                 .corner_radius(CornerRadius::same(12))
                 .inner_margin(Margin::same(18))
                 .show(ui, |ui| {
@@ -297,14 +295,26 @@ fn draw_menu(
                             video_device_options(video_devices, &current_video_device),
                         );
 
+                        let caps = crate::devices::get_device_capabilities(&draft.video_device);
+                        crate::devices::sanitize_draft_settings(draft, &caps);
+
+                        let available_resolutions = crate::devices::supported_resolutions(&caps);
+                        let available_fps = crate::devices::supported_fps_modes(&caps, &draft.resolution);
+                        let available_formats = crate::devices::supported_video_formats(
+                            &caps,
+                            &draft.resolution,
+                            draft.get_fps(),
+                        );
+                        let max_res_fps = crate::devices::max_fps_for_resolution(&caps, &draft.resolution);
+
                         ui.columns(2, |columns| {
                             labeled_combo_static(
                                 &mut columns[0],
                                 "Resolution",
                                 &mut draft.resolution,
-                                RESOLUTION_OPTIONS,
+                                &available_resolutions,
                             );
-                            fps_mode_combo(&mut columns[1], &mut draft.fps_mode);
+                            fps_mode_combo(&mut columns[1], &mut draft.fps_mode, &available_fps);
                         });
 
                         ui.columns(2, |columns| {
@@ -312,6 +322,7 @@ fn draw_menu(
                                 &mut columns[0],
                                 "Video Format",
                                 &mut draft.video_format,
+                                &available_formats,
                             );
                             scaling_filter_combo(
                                 &mut columns[1],
@@ -334,7 +345,7 @@ fn draw_menu(
                         });
 
                         if draft.fps_mode == FPS_MODE_CUSTOM {
-                            labeled_custom_fps(ui, draft);
+                            labeled_custom_fps(ui, draft, max_res_fps);
                             warning_text(
                                 ui,
                                 "Custom FPS is experimental and is not guaranteed to work with all devices.",
@@ -412,7 +423,7 @@ fn separator(ui: &mut egui::Ui) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 1.0), egui::Sense::hover());
     ui.painter().line_segment(
         [rect.left_center(), rect.right_center()],
-        Stroke::new(1.0, COLOR_MENU_BORDER),
+        Stroke::new(1.0_f32, COLOR_MENU_BORDER),
     );
     ui.add_space(4.0);
 }
@@ -460,14 +471,19 @@ fn labeled_combo_static(
         });
 }
 
-fn video_format_combo(ui: &mut egui::Ui, label: &str, selected: &mut VideoFormat) {
+fn video_format_combo(
+    ui: &mut egui::Ui,
+    label: &str,
+    selected: &mut VideoFormat,
+    available_formats: &[VideoFormat],
+) {
     ui.label(RichText::new(label).color(COLOR_TEXT_SECONDARY));
     ComboBox::from_id_salt(label)
         .width(ui.available_width())
         .selected_text(selected.to_string())
         .show_ui(ui, |ui| {
-            for format in VideoFormat::ALL {
-                ui.selectable_value(selected, format, format.to_string());
+            for format in available_formats {
+                ui.selectable_value(selected, *format, format.to_string());
             }
         });
 }
@@ -508,26 +524,36 @@ fn color_range_combo(ui: &mut egui::Ui, label: &str, selected: &mut ColorRange) 
         });
 }
 
-fn fps_mode_combo(ui: &mut egui::Ui, fps_mode: &mut String) {
+fn fps_mode_combo(
+    ui: &mut egui::Ui,
+    fps_mode: &mut String,
+    available_fps: &[(&'static str, &'static str)],
+) {
     ui.label(RichText::new("Frame Rate").color(COLOR_TEXT_SECONDARY));
-    ComboBox::from_id_salt("fps_mode")
-        .width(ui.available_width())
-        .selected_text(match fps_mode.as_str() {
+    let selected_label = available_fps
+        .iter()
+        .find(|(mode, _)| *mode == fps_mode.as_str())
+        .map(|(_, label)| *label)
+        .unwrap_or(match fps_mode.as_str() {
             FPS_MODE_30 => "30 FPS",
             FPS_MODE_120 => "120 FPS",
             FPS_MODE_CUSTOM => "Custom",
             _ => "60 FPS",
-        })
+        });
+
+    ComboBox::from_id_salt("fps_mode")
+        .width(ui.available_width())
+        .selected_text(selected_label)
         .show_ui(ui, |ui| {
-            ui.selectable_value(fps_mode, FPS_MODE_30.to_string(), "30 FPS");
-            ui.selectable_value(fps_mode, FPS_MODE_60.to_string(), "60 FPS");
-            ui.selectable_value(fps_mode, FPS_MODE_120.to_string(), "120 FPS");
-            ui.selectable_value(fps_mode, FPS_MODE_CUSTOM.to_string(), "Custom");
+            for &(mode, label) in available_fps {
+                ui.selectable_value(fps_mode, mode.to_string(), label);
+            }
         });
 }
 
-fn labeled_custom_fps(ui: &mut egui::Ui, draft: &mut Settings) {
+fn labeled_custom_fps(ui: &mut egui::Ui, draft: &mut Settings, max_fps: u32) {
     ui.label(RichText::new("Custom FPS").color(COLOR_TEXT_SECONDARY));
+    let effective_max = max_fps.min(MAX_FPS);
     ui.horizontal(|ui| {
         if ui.small_button("-").clicked() {
             draft.custom_fps = draft.custom_fps.saturating_sub(1).max(MIN_FPS);
@@ -538,7 +564,7 @@ fn labeled_custom_fps(ui: &mut egui::Ui, draft: &mut Settings) {
                 .color(COLOR_TEXT_PRIMARY),
         );
         if ui.small_button("+").clicked() {
-            draft.custom_fps = draft.custom_fps.saturating_add(1).min(MAX_FPS);
+            draft.custom_fps = draft.custom_fps.saturating_add(1).min(effective_max);
         }
     });
 }
@@ -569,9 +595,9 @@ fn labeled_volume(ui: &mut egui::Ui, draft: &mut Settings) {
         let changed = ui
             .scope(|ui| {
                 let visuals = &mut ui.visuals_mut().widgets;
-                visuals.inactive.fg_stroke = Stroke::new(2.0, COLOR_ACCENT);
-                visuals.hovered.fg_stroke = Stroke::new(2.0, COLOR_ACCENT);
-                visuals.active.fg_stroke = Stroke::new(2.0, COLOR_ACCENT);
+                visuals.inactive.fg_stroke = Stroke::new(2.0_f32, COLOR_ACCENT);
+                visuals.hovered.fg_stroke = Stroke::new(2.0_f32, COLOR_ACCENT);
+                visuals.active.fg_stroke = Stroke::new(2.0_f32, COLOR_ACCENT);
                 ui.add(slider).changed()
             })
             .inner;
@@ -590,7 +616,7 @@ fn styled_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
     ui.add(
         Button::new(RichText::new(text).color(COLOR_TEXT_PRIMARY))
             .fill(COLOR_PANEL_BG)
-            .stroke(Stroke::new(1.0, COLOR_BORDER)),
+            .stroke(Stroke::new(1.0_f32, COLOR_BORDER)),
     )
 }
 
@@ -599,7 +625,7 @@ fn exit_button(ui: &mut egui::Ui) -> egui::Response {
         ui.add(
             Button::new(RichText::new("Exit TackleCast").color(COLOR_TEXT_PRIMARY))
                 .fill(COLOR_EXIT_BG)
-                .stroke(Stroke::new(1.0, COLOR_ACCENT))
+                .stroke(Stroke::new(1.0_f32, COLOR_ACCENT))
                 .min_size(egui::vec2(ui.available_width(), 0.0)),
         )
     })
