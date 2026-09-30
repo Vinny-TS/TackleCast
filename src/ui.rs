@@ -369,6 +369,17 @@ fn draw_menu(
                             );
                         });
 
+                        if draft.scaling_filter == ScaleFilter::Fsr1 {
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new("FSR Sharpness").color(COLOR_TEXT_SECONDARY));
+                                ui.add(
+                                    Slider::new(&mut draft.sharpness, 0.0..=2.0)
+                                        .step_by(0.05)
+                                        .show_value(true),
+                                );
+                            });
+                        }
+
                         if draft.fps_mode == FPS_MODE_CUSTOM {
                             labeled_custom_fps(ui, draft, max_res_fps);
                             warning_text(

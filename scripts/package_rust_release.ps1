@@ -186,9 +186,12 @@ $gpuNote
 
 Scaling filters
 ---------------
-Settings has a Scaling Filter option: Bilinear, Bicubic, or Lanczos. It only
-affects the image when the window is larger than the capture resolution. Tick
-"Include Scaling Filter In Overlay" to see which one is live while comparing.
+Settings has a Scaling Filter option: Bilinear, Bicubic, Lanczos, or FSR 1.0.
+When FSR 1.0 is selected, AMD FidelityFX Super Resolution (EASU spatial upsampling
+followed by RCAS contrast-adaptive sharpening) is applied with an adjustable
+sharpness slider. It enhances edge reconstruction and crispness when the window
+is larger than the capture resolution. Tick "Include Scaling Filter In Overlay"
+to see which one is live while comparing.
 
 Color space and range
 ---------------------

@@ -44,6 +44,8 @@ pub struct Settings {
     /// over three lines. Off by default, keeping the overlay to one line.
     #[serde(default)]
     pub detailed_overlay: bool,
+    #[serde(default = "default_sharpness")]
+    pub sharpness: f32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -105,6 +107,7 @@ pub enum ScaleFilter {
     Bilinear,
     Bicubic,
     Lanczos,
+    Fsr1,
 }
 
 impl ScaleFilter {
@@ -115,11 +118,12 @@ impl ScaleFilter {
             Self::Bilinear => 0,
             Self::Bicubic => 1,
             Self::Lanczos => 2,
+            Self::Fsr1 => 3,
         }
     }
 
     /// Every variant, in menu order.
-    pub const ALL: [Self; 3] = [Self::Bilinear, Self::Bicubic, Self::Lanczos];
+    pub const ALL: [Self; 4] = [Self::Bilinear, Self::Bicubic, Self::Lanczos, Self::Fsr1];
 }
 
 impl Display for ScaleFilter {
@@ -128,6 +132,7 @@ impl Display for ScaleFilter {
             Self::Bilinear => f.write_str("Bilinear"),
             Self::Bicubic => f.write_str("Bicubic"),
             Self::Lanczos => f.write_str("Lanczos"),
+            Self::Fsr1 => f.write_str("FSR 1.0"),
         }
     }
 }
@@ -247,6 +252,7 @@ impl Default for Settings {
             volume: default_volume(),
             show_overlay: default_show_overlay(),
             detailed_overlay: false,
+            sharpness: default_sharpness(),
         }
     }
 }
@@ -392,6 +398,10 @@ fn default_volume() -> f64 {
 
 fn default_show_overlay() -> bool {
     true
+}
+
+fn default_sharpness() -> f32 {
+    0.5
 }
 
 #[cfg(test)]

@@ -329,6 +329,7 @@ impl ApplicationHandler<AppEvent> for App {
             self.settings.scaling_filter,
             self.settings.color_space,
             self.settings.color_range,
+            self.settings.sharpness,
         )) {
             Ok(renderer) => renderer,
             Err(error) => {
@@ -625,6 +626,7 @@ impl App {
             || old_settings.audio_output != self.settings.audio_output;
 
         let scaling_changed = old_settings.scaling_filter != self.settings.scaling_filter;
+        let sharpness_changed = (old_settings.sharpness - self.settings.sharpness).abs() > 0.001;
         let color_changed = old_settings.color_space != self.settings.color_space
             || old_settings.color_range != self.settings.color_range;
 
@@ -648,13 +650,19 @@ impl App {
             }
         }
 
+        if sharpness_changed {
+            if let Some(renderer) = &mut self.renderer {
+                renderer.set_sharpness(self.settings.sharpness);
+            }
+        }
+
         if color_changed {
             if let Some(renderer) = &mut self.renderer {
                 renderer.set_color_settings(self.settings.color_space, self.settings.color_range);
             }
         }
 
-        if scaling_changed || color_changed {
+        if scaling_changed || sharpness_changed || color_changed {
             if let Some(window) = &self.window {
                 window.request_redraw();
             }

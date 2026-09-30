@@ -26,6 +26,7 @@ pub struct Renderer {
     queue: wgpu::Queue,
     config: SurfaceConfiguration,
     size: PhysicalSize<u32>,
+    surface_format: wgpu::TextureFormat,
     video_pipeline: wgpu::RenderPipeline,
     video_bind_group_layout: wgpu::BindGroupLayout,
     video_samplers: VideoSamplers,
@@ -33,8 +34,11 @@ pub struct Renderer {
     scale_filter: ScaleFilter,
     color_space: ColorSpace,
     color_range: ColorRange,
+    sharpness: f32,
     video_frame: Option<VideoFrameResources>,
     egui_renderer: EguiRenderer,
+    upscale_pipelines: Option<UpscalePipelines>,
+    upscale_textures: Option<UpscaleTextures>,
     // Reusable scratch buffers to avoid per-frame allocations
     pad_scratch: Vec<u8>,
     nv12_u_scratch: Vec<u8>,
@@ -53,6 +57,7 @@ impl Renderer {
         scale_filter: ScaleFilter,
         color_space: ColorSpace,
         color_range: ColorRange,
+        sharpness: f32,
     ) -> Result<Self, RenderError> {
         let size = window.inner_size();
         // Prefer DX12 on Windows so that CUDA ↔ DX12 zero-copy interop works.
@@ -233,6 +238,7 @@ impl Renderer {
             queue,
             config,
             size,
+            surface_format,
             video_pipeline,
             video_bind_group_layout,
             video_samplers: VideoSamplers {
@@ -243,8 +249,11 @@ impl Renderer {
             scale_filter,
             color_space,
             color_range,
+            sharpness,
             video_frame: None,
             egui_renderer,
+            upscale_pipelines: None,
+            upscale_textures: None,
             pad_scratch: Vec::new(),
             nv12_u_scratch: Vec::new(),
             nv12_v_scratch: Vec::new(),
@@ -271,6 +280,13 @@ impl Renderer {
 
     pub fn set_scale_filter(&mut self, filter: ScaleFilter) {
         self.scale_filter = filter;
+        if filter != ScaleFilter::Fsr1 {
+            self.upscale_textures = None;
+        }
+    }
+
+    pub fn set_sharpness(&mut self, sharpness: f32) {
+        self.sharpness = sharpness;
     }
 
     pub fn set_color_settings(&mut self, color_space: ColorSpace, color_range: ColorRange) {
@@ -591,21 +607,182 @@ impl Renderer {
             let resolved_space = self.color_space.resolve(video_frame.width, video_frame.height);
             let resolved_range = self.color_range.resolve(video_frame.format);
 
-            let uniforms = VideoUniforms {
-                format_mode: VideoUniforms::format_mode_for(video_frame.format),
-                filter_mode: self.scale_filter.as_u32(),
-                color_space: resolved_space.as_u32(),
-                color_range: resolved_range.as_u32(),
-                viewport_size: [viewport.width, viewport.height],
-                _padding: [0.0; 2],
-            };
+            if self.scale_filter == ScaleFilter::Fsr1 {
+                let out_w = viewport.width.round().max(1.0) as u32;
+                let out_h = viewport.height.round().max(1.0) as u32;
 
-            self.queue
-                .write_buffer(&self.uniforms, 0, bytemuck::bytes_of(&uniforms));
-        }
+                Self::ensure_upscale_resources(
+                    &self.device,
+                    &self.video_bind_group_layout,
+                    self.surface_format,
+                    &mut self.upscale_pipelines,
+                    &mut self.upscale_textures,
+                    video_frame.width,
+                    video_frame.height,
+                    out_w,
+                    out_h,
+                );
+                let pipelines = self.upscale_pipelines.as_ref().unwrap();
+                let textures = self.upscale_textures.as_ref().unwrap();
 
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                // 1:1 Bilinear conversion from YUV to native RGB
+                let yuv_uniforms = VideoUniforms {
+                    format_mode: VideoUniforms::format_mode_for(video_frame.format),
+                    filter_mode: 0,
+                    color_space: resolved_space.as_u32(),
+                    color_range: resolved_range.as_u32(),
+                    viewport_size: [video_frame.width as f32, video_frame.height as f32],
+                    _padding: [0.0; 2],
+                };
+                self.queue
+                    .write_buffer(&self.uniforms, 0, bytemuck::bytes_of(&yuv_uniforms));
+
+                let easu_con = calculate_easu_constants(
+                    video_frame.width as f32,
+                    video_frame.height as f32,
+                    out_w as f32,
+                    out_h as f32,
+                );
+                self.queue.write_buffer(
+                    &pipelines.easu_uniforms,
+                    0,
+                    bytemuck::bytes_of(&easu_con),
+                );
+
+                let rcas_con = RcasConstants {
+                    con: [(self.sharpness * 0.5).clamp(0.0, 1.0), 0.0, 0.0, 0.0],
+                    output_size: [out_w as f32, out_h as f32],
+                    _pad: [0.0; 2],
+                };
+                self.queue.write_buffer(
+                    &pipelines.rcas_uniforms,
+                    0,
+                    bytemuck::bytes_of(&rcas_con),
+                );
+
+                // Pass 1: YUV -> RGB native resolution texture
+                {
+                    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("tacklecast-fsr-yuv-to-rgb-pass"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &textures.native_rgb_view,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(CLEAR_COLOR),
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: None,
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                    });
+                    pass.set_pipeline(&pipelines.yuv_to_rgb_pipeline);
+                    pass.set_bind_group(0, &video_frame.bind_group, &[]);
+                    pass.set_viewport(
+                        0.0,
+                        0.0,
+                        video_frame.width as f32,
+                        video_frame.height as f32,
+                        0.0,
+                        1.0,
+                    );
+                    pass.draw(0..6, 0..1);
+                }
+
+                // Pass 2: EASU upscale pass
+                {
+                    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("tacklecast-fsr-easu-pass"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &textures.easu_output_view,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(CLEAR_COLOR),
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: None,
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                    });
+                    pass.set_pipeline(&pipelines.easu_pipeline);
+                    pass.set_bind_group(0, &textures.easu_bind_group, &[]);
+                    pass.set_viewport(0.0, 0.0, out_w as f32, out_h as f32, 0.0, 1.0);
+                    pass.draw(0..6, 0..1);
+                }
+
+                // Pass 3: RCAS sharpening pass onto surface view with letterbox clear
+                {
+                    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("tacklecast-fsr-rcas-surface-pass"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &view,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(CLEAR_COLOR),
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: None,
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                    });
+                    pass.set_pipeline(&pipelines.rcas_pipeline);
+                    pass.set_bind_group(0, &textures.rcas_bind_group, &[]);
+                    pass.set_viewport(
+                        viewport.x,
+                        viewport.y,
+                        viewport.width.max(1.0),
+                        viewport.height.max(1.0),
+                        0.0,
+                        1.0,
+                    );
+                    pass.draw(0..6, 0..1);
+                }
+            } else {
+                self.upscale_textures = None;
+
+                let uniforms = VideoUniforms {
+                    format_mode: VideoUniforms::format_mode_for(video_frame.format),
+                    filter_mode: self.scale_filter.as_u32(),
+                    color_space: resolved_space.as_u32(),
+                    color_range: resolved_range.as_u32(),
+                    viewport_size: [viewport.width, viewport.height],
+                    _padding: [0.0; 2],
+                };
+
+                self.queue
+                    .write_buffer(&self.uniforms, 0, bytemuck::bytes_of(&uniforms));
+
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("tacklecast-clear-pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(CLEAR_COLOR),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+
+                pass.set_pipeline(&self.video_pipeline);
+                pass.set_bind_group(0, &video_frame.bind_group, &[]);
+                pass.set_viewport(
+                    viewport.x,
+                    viewport.y,
+                    viewport.width.max(1.0),
+                    viewport.height.max(1.0),
+                    0.0,
+                    1.0,
+                );
+                pass.draw(0..6, 0..1);
+            }
+        } else {
+            let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("tacklecast-clear-pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
@@ -619,20 +796,6 @@ impl Renderer {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-
-            if let (Some(video_frame), Some(viewport)) = (&self.video_frame, video_viewport) {
-                pass.set_pipeline(&self.video_pipeline);
-                pass.set_bind_group(0, &video_frame.bind_group, &[]);
-                pass.set_viewport(
-                    viewport.x,
-                    viewport.y,
-                    viewport.width.max(1.0),
-                    viewport.height.max(1.0),
-                    0.0,
-                    1.0,
-                );
-                pass.draw(0..6, 0..1);
-            }
         }
 
         if let Some(ui) = ui.as_ref() {
@@ -665,6 +828,331 @@ impl Renderer {
         self.window.pre_present_notify();
         frame.present();
         Ok(())
+    }
+
+    fn ensure_upscale_resources(
+        device: &wgpu::Device,
+        video_bind_group_layout: &wgpu::BindGroupLayout,
+        surface_format: wgpu::TextureFormat,
+        upscale_pipelines: &mut Option<UpscalePipelines>,
+        upscale_textures: &mut Option<UpscaleTextures>,
+        video_width: u32,
+        video_height: u32,
+        out_width: u32,
+        out_height: u32,
+    ) {
+        if upscale_pipelines.is_none() {
+            *upscale_pipelines = Some(Self::create_upscale_pipelines(
+                device,
+                video_bind_group_layout,
+                surface_format,
+            ));
+        }
+
+        let needs_texture_rebuild = match upscale_textures.as_ref() {
+            Some(tex) => {
+                tex.native_width != video_width
+                    || tex.native_height != video_height
+                    || tex.easu_width != out_width
+                    || tex.easu_height != out_height
+            }
+            None => true,
+        };
+
+        if needs_texture_rebuild {
+            let pipelines = upscale_pipelines.as_ref().unwrap();
+            *upscale_textures = Some(Self::create_upscale_textures(
+                device,
+                pipelines,
+                video_width,
+                video_height,
+                out_width,
+                out_height,
+            ));
+        }
+    }
+
+    fn create_upscale_pipelines(
+        device: &wgpu::Device,
+        video_bind_group_layout: &wgpu::BindGroupLayout,
+        surface_format: wgpu::TextureFormat,
+    ) -> UpscalePipelines {
+        let video_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("tacklecast-video-shader-intermediate"),
+            source: wgpu::ShaderSource::Wgsl(VIDEO_SHADER.into()),
+        });
+        let video_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("tacklecast-video-intermediate-pipeline-layout"),
+            bind_group_layouts: &[video_bind_group_layout],
+            push_constant_ranges: &[],
+        });
+        let yuv_to_rgb_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("tacklecast-yuv-to-rgb-pipeline"),
+            layout: Some(&video_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &video_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &video_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
+        let easu_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("tacklecast-fsr-easu-bind-group-layout"),
+                entries: &[
+                    texture_layout_entry(0),
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+
+        let easu_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("tacklecast-fsr-easu-shader"),
+            source: wgpu::ShaderSource::Wgsl(EASU_SHADER.into()),
+        });
+
+        let easu_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("tacklecast-fsr-easu-pipeline-layout"),
+            bind_group_layouts: &[&easu_bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        let easu_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("tacklecast-fsr-easu-pipeline"),
+            layout: Some(&easu_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &easu_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &easu_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
+        let rcas_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("tacklecast-fsr-rcas-bind-group-layout"),
+                entries: &[
+                    texture_layout_entry(0),
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+
+        let rcas_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("tacklecast-fsr-rcas-shader"),
+            source: wgpu::ShaderSource::Wgsl(RCAS_SHADER.into()),
+        });
+
+        let rcas_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("tacklecast-fsr-rcas-pipeline-layout"),
+            bind_group_layouts: &[&rcas_bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        let rcas_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("tacklecast-fsr-rcas-pipeline"),
+            layout: Some(&rcas_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &rcas_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &rcas_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
+        let easu_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("tacklecast-fsr-easu-sampler"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            ..Default::default()
+        });
+
+        let easu_uniforms = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("tacklecast-fsr-easu-uniforms"),
+            size: std::mem::size_of::<EasuConstants>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let rcas_uniforms = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("tacklecast-fsr-rcas-uniforms"),
+            size: std::mem::size_of::<RcasConstants>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        UpscalePipelines {
+            yuv_to_rgb_pipeline,
+            easu_pipeline,
+            rcas_pipeline,
+            easu_bind_group_layout,
+            rcas_bind_group_layout,
+            easu_sampler,
+            easu_uniforms,
+            rcas_uniforms,
+        }
+    }
+
+    fn create_upscale_textures(
+        device: &wgpu::Device,
+        pipelines: &UpscalePipelines,
+        native_width: u32,
+        native_height: u32,
+        easu_width: u32,
+        easu_height: u32,
+    ) -> UpscaleTextures {
+        let native_rgb_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("tacklecast-fsr-native-rgb-texture"),
+            size: wgpu::Extent3d {
+                width: native_width.max(1),
+                height: native_height.max(1),
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let native_rgb_view =
+            native_rgb_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let easu_output_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("tacklecast-fsr-easu-output-texture"),
+            size: wgpu::Extent3d {
+                width: easu_width.max(1),
+                height: easu_height.max(1),
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let easu_output_view =
+            easu_output_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let easu_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("tacklecast-fsr-easu-bind-group"),
+            layout: &pipelines.easu_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&native_rgb_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&pipelines.easu_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: pipelines.easu_uniforms.as_entire_binding(),
+                },
+            ],
+        });
+
+        let rcas_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("tacklecast-fsr-rcas-bind-group"),
+            layout: &pipelines.rcas_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&easu_output_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: pipelines.rcas_uniforms.as_entire_binding(),
+                },
+            ],
+        });
+
+        UpscaleTextures {
+            native_rgb_texture,
+            native_rgb_view,
+            native_width,
+            native_height,
+            easu_output_texture,
+            easu_output_view,
+            easu_width,
+            easu_height,
+            easu_bind_group,
+            rcas_bind_group,
+        }
     }
 }
 
@@ -712,6 +1200,84 @@ impl VideoUniforms {
             PixelFormat::Yuvj422p => 1,
         }
     }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable, Debug, PartialEq)]
+struct EasuConstants {
+    con0: [f32; 4],
+    con1: [f32; 4],
+    con2: [f32; 4],
+    con3: [f32; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable, Debug, PartialEq)]
+struct RcasConstants {
+    con: [f32; 4],
+    output_size: [f32; 2],
+    _pad: [f32; 2],
+}
+
+fn calculate_easu_constants(
+    in_w: f32,
+    in_h: f32,
+    out_w: f32,
+    out_h: f32,
+) -> EasuConstants {
+    EasuConstants {
+        con0: [
+            in_w / out_w,
+            in_h / out_h,
+            0.5 * in_w / out_w - 0.5,
+            0.5 * in_h / out_h - 0.5,
+        ],
+        con1: [
+            1.0 / in_w,
+            1.0 / in_h,
+            1.0 / in_w,
+            -1.0 / in_h,
+        ],
+        con2: [
+            -1.0 / in_w,
+            2.0 / in_h,
+            1.0 / in_w,
+            2.0 / in_h,
+        ],
+        con3: [
+            0.0,
+            4.0 / in_h,
+            out_w,
+            out_h,
+        ],
+    }
+}
+
+struct UpscalePipelines {
+    yuv_to_rgb_pipeline: wgpu::RenderPipeline,
+    easu_pipeline: wgpu::RenderPipeline,
+    rcas_pipeline: wgpu::RenderPipeline,
+    easu_bind_group_layout: wgpu::BindGroupLayout,
+    rcas_bind_group_layout: wgpu::BindGroupLayout,
+    easu_sampler: wgpu::Sampler,
+    easu_uniforms: wgpu::Buffer,
+    rcas_uniforms: wgpu::Buffer,
+}
+
+#[allow(dead_code)]
+struct UpscaleTextures {
+    native_rgb_texture: wgpu::Texture,
+    native_rgb_view: wgpu::TextureView,
+    native_width: u32,
+    native_height: u32,
+
+    easu_output_texture: wgpu::Texture,
+    easu_output_view: wgpu::TextureView,
+    easu_width: u32,
+    easu_height: u32,
+
+    easu_bind_group: wgpu::BindGroup,
+    rcas_bind_group: wgpu::BindGroup,
 }
 
 struct VideoFrameResources {
@@ -941,6 +1507,29 @@ mod tests {
     #[test]
     fn video_uniforms_layout() {
         assert_eq!(std::mem::size_of::<VideoUniforms>(), 32);
+    }
+
+    #[test]
+    fn easu_constants_layout() {
+        assert_eq!(std::mem::size_of::<EasuConstants>(), 64);
+    }
+
+    #[test]
+    fn rcas_constants_layout() {
+        assert_eq!(std::mem::size_of::<RcasConstants>(), 32);
+    }
+
+    #[test]
+    fn easu_constants_calculation() {
+        let con = calculate_easu_constants(1920.0, 1080.0, 3840.0, 2160.0);
+        assert!((con.con0[0] - 0.5).abs() < 1e-6);
+        assert!((con.con0[1] - 0.5).abs() < 1e-6);
+        assert!((con.con0[2] - (-0.25)).abs() < 1e-6);
+        assert!((con.con0[3] - (-0.25)).abs() < 1e-6);
+        assert!((con.con1[0] - (1.0 / 1920.0)).abs() < 1e-6);
+        assert!((con.con1[1] - (1.0 / 1080.0)).abs() < 1e-6);
+        assert_eq!(con.con3[2], 3840.0);
+        assert_eq!(con.con3[3], 2160.0);
     }
 }
 
@@ -1270,3 +1859,304 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     return vec4<f32>(clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
 }
 "#;
+
+const EASU_SHADER: &str = r#"
+struct EasuConstants {
+    con0: vec4<f32>,
+    con1: vec4<f32>,
+    con2: vec4<f32>,
+    con3: vec4<f32>,
+};
+
+@group(0) @binding(0) var easu_tex: texture_2d<f32>;
+@group(0) @binding(1) var easu_sampler: sampler;
+@group(0) @binding(2) var<uniform> easu_con: EasuConstants;
+
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
+    var positions = array<vec2<f32>, 6>(
+        vec2<f32>(-1.0, -1.0),
+        vec2<f32>( 1.0, -1.0),
+        vec2<f32>(-1.0,  1.0),
+        vec2<f32>(-1.0,  1.0),
+        vec2<f32>( 1.0, -1.0),
+        vec2<f32>( 1.0,  1.0),
+    );
+    var uvs = array<vec2<f32>, 6>(
+        vec2<f32>(0.0, 1.0),
+        vec2<f32>(1.0, 1.0),
+        vec2<f32>(0.0, 0.0),
+        vec2<f32>(0.0, 0.0),
+        vec2<f32>(1.0, 1.0),
+        vec2<f32>(1.0, 0.0),
+    );
+    var out: VertexOutput;
+    out.position = vec4<f32>(positions[vertex_index], 0.0, 1.0);
+    out.uv = uvs[vertex_index];
+    return out;
+}
+
+fn FsrEasuTapF(
+    aC: ptr<function, vec3<f32>>,
+    aW: ptr<function, f32>,
+    off: vec2<f32>,
+    dir: vec2<f32>,
+    len: vec2<f32>,
+    lob: f32,
+    clp: f32,
+    c: vec3<f32>,
+) {
+    var v: vec2<f32>;
+    v.x = (off.x * dir.x) + (off.y * dir.y);
+    v.y = (off.x * (-dir.y)) + (off.y * dir.x);
+    v = v * len;
+    var d2 = v.x * v.x + v.y * v.y;
+    d2 = min(d2, clp);
+    var wB = (2.0 / 5.0) * d2 - 1.0;
+    var wA = lob * d2 - 1.0;
+    wB = wB * wB;
+    wA = wA * wA;
+    wB = (25.0 / 16.0) * wB - (25.0 / 16.0 - 1.0);
+    let w = wB * wA;
+    *aC = *aC + c * w;
+    *aW = *aW + w;
+}
+
+fn FsrEasuSetF(
+    dir: ptr<function, vec2<f32>>,
+    len: ptr<function, f32>,
+    pp: vec2<f32>,
+    biS: bool, biT: bool, biU: bool, biV: bool,
+    lA: f32, lB: f32, lC: f32, lD: f32, lE: f32,
+) {
+    var w = 0.0;
+    if (biS) { w = (1.0 - pp.x) * (1.0 - pp.y); }
+    if (biT) { w = pp.x * (1.0 - pp.y); }
+    if (biU) { w = (1.0 - pp.x) * pp.y; }
+    if (biV) { w = pp.x * pp.y; }
+
+    let dc = lD - lC;
+    let cb = lC - lB;
+    let lenX_raw = max(abs(dc), abs(cb));
+    let dirX = lD - lB;
+    (*dir).x = (*dir).x + dirX * w;
+    if (lenX_raw > 0.0) {
+        var lenX = clamp(abs(dirX) / lenX_raw, 0.0, 1.0);
+        lenX = lenX * lenX;
+        *len = *len + lenX * w;
+    }
+
+    let ec = lE - lC;
+    let ca = lC - lA;
+    let lenY_raw = max(abs(ec), abs(ca));
+    let dirY = lE - lA;
+    (*dir).y = (*dir).y + dirY * w;
+    if (lenY_raw > 0.0) {
+        var lenY = clamp(abs(dirY) / lenY_raw, 0.0, 1.0);
+        lenY = lenY * lenY;
+        *len = *len + lenY * w;
+    }
+}
+
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    let ip = floor(in.position.xy);
+    let pp = ip * easu_con.con0.xy + easu_con.con0.zw;
+    let fp = floor(pp);
+    let pp_rel = pp - fp;
+
+    let p0 = fp * easu_con.con1.xy + easu_con.con1.zw;
+    let p1 = p0 + easu_con.con2.xy;
+    let p2 = p0 + easu_con.con2.zw;
+    let p3 = p0 + easu_con.con3.xy;
+
+    let bczzR = textureGather(0, easu_tex, easu_sampler, p0);
+    let bczzG = textureGather(1, easu_tex, easu_sampler, p0);
+    let bczzB = textureGather(2, easu_tex, easu_sampler, p0);
+
+    let ijfeR = textureGather(0, easu_tex, easu_sampler, p1);
+    let ijfeG = textureGather(1, easu_tex, easu_sampler, p1);
+    let ijfeB = textureGather(2, easu_tex, easu_sampler, p1);
+
+    let klhgR = textureGather(0, easu_tex, easu_sampler, p2);
+    let klhgG = textureGather(1, easu_tex, easu_sampler, p2);
+    let klhgB = textureGather(2, easu_tex, easu_sampler, p2);
+
+    let zzonR = textureGather(0, easu_tex, easu_sampler, p3);
+    let zzonG = textureGather(1, easu_tex, easu_sampler, p3);
+    let zzonB = textureGather(2, easu_tex, easu_sampler, p3);
+
+    let bczzL = bczzB * 0.5 + (bczzR * 0.5 + bczzG);
+    let ijfeL = ijfeB * 0.5 + (ijfeR * 0.5 + ijfeG);
+    let klhgL = klhgB * 0.5 + (klhgR * 0.5 + klhgG);
+    let zzonL = zzonB * 0.5 + (zzonR * 0.5 + zzonG);
+
+    let bL = bczzL.x;
+    let cL = bczzL.y;
+    let iL = ijfeL.x;
+    let jL = ijfeL.y;
+    let fL = ijfeL.z;
+    let eL = ijfeL.w;
+    let kL = klhgL.x;
+    let lL = klhgL.y;
+    let hL = klhgL.z;
+    let gL = klhgL.w;
+    let oL = zzonL.z;
+    let nL = zzonL.w;
+
+    var dir = vec2<f32>(0.0);
+    var len = 0.0;
+    FsrEasuSetF(&dir, &len, pp_rel, true, false, false, false, bL, eL, fL, gL, jL);
+    FsrEasuSetF(&dir, &len, pp_rel, false, true, false, false, cL, fL, gL, hL, kL);
+    FsrEasuSetF(&dir, &len, pp_rel, false, false, true, false, fL, iL, jL, kL, nL);
+    FsrEasuSetF(&dir, &len, pp_rel, false, false, false, true, gL, jL, kL, lL, oL);
+
+    let dir2 = dir * dir;
+    var dirR = dir2.x + dir2.y;
+    let zro = dirR < (1.0 / 32768.0);
+    if (zro) {
+        dirR = 1.0;
+        dir.x = 1.0;
+    } else {
+        dirR = inverseSqrt(dirR);
+    }
+    dir = dir * dirR;
+
+    len = len * 0.5;
+    len = len * len;
+
+    let stretch = (dir.x * dir.x + dir.y * dir.y) / max(max(abs(dir.x), abs(dir.y)), 1e-5);
+    let len2 = vec2<f32>(1.0 + (stretch - 1.0) * len, 1.0 - 0.5 * len);
+    let lob = 0.5 + ((1.0 / 4.0 - 0.04) - 0.5) * len;
+    let clp = 1.0 / lob;
+
+    let min4 = min(
+        min(vec3<f32>(ijfeR.z, ijfeG.z, ijfeB.z), vec3<f32>(klhgR.w, klhgG.w, klhgB.w)),
+        min(vec3<f32>(ijfeR.y, ijfeG.y, ijfeB.y), vec3<f32>(klhgR.x, klhgG.x, klhgB.x))
+    );
+    let max4 = max(
+        max(vec3<f32>(ijfeR.z, ijfeG.z, ijfeB.z), vec3<f32>(klhgR.w, klhgG.w, klhgB.w)),
+        max(vec3<f32>(ijfeR.y, ijfeG.y, ijfeB.y), vec3<f32>(klhgR.x, klhgG.x, klhgB.x))
+    );
+
+    var aC = vec3<f32>(0.0);
+    var aW = 0.0;
+    FsrEasuTapF(&aC, &aW, vec2<f32>( 0.0, -1.0) - pp_rel, dir, len2, lob, clp, vec3<f32>(bczzR.x, bczzG.x, bczzB.x));
+    FsrEasuTapF(&aC, &aW, vec2<f32>( 1.0, -1.0) - pp_rel, dir, len2, lob, clp, vec3<f32>(bczzR.y, bczzG.y, bczzB.y));
+    FsrEasuTapF(&aC, &aW, vec2<f32>(-1.0,  1.0) - pp_rel, dir, len2, lob, clp, vec3<f32>(ijfeR.x, ijfeG.x, ijfeB.x));
+    FsrEasuTapF(&aC, &aW, vec2<f32>( 0.0,  1.0) - pp_rel, dir, len2, lob, clp, vec3<f32>(ijfeR.y, ijfeG.y, ijfeB.y));
+    FsrEasuTapF(&aC, &aW, vec2<f32>( 0.0,  0.0) - pp_rel, dir, len2, lob, clp, vec3<f32>(ijfeR.z, ijfeG.z, ijfeB.z));
+    FsrEasuTapF(&aC, &aW, vec2<f32>(-1.0,  0.0) - pp_rel, dir, len2, lob, clp, vec3<f32>(ijfeR.w, ijfeG.w, ijfeB.w));
+    FsrEasuTapF(&aC, &aW, vec2<f32>( 1.0,  1.0) - pp_rel, dir, len2, lob, clp, vec3<f32>(klhgR.x, klhgG.x, klhgB.x));
+    FsrEasuTapF(&aC, &aW, vec2<f32>( 2.0,  1.0) - pp_rel, dir, len2, lob, clp, vec3<f32>(klhgR.y, klhgG.y, klhgB.y));
+    FsrEasuTapF(&aC, &aW, vec2<f32>( 2.0,  0.0) - pp_rel, dir, len2, lob, clp, vec3<f32>(klhgR.z, klhgG.z, klhgB.z));
+    FsrEasuTapF(&aC, &aW, vec2<f32>( 1.0,  0.0) - pp_rel, dir, len2, lob, clp, vec3<f32>(klhgR.w, klhgG.w, klhgB.w));
+    FsrEasuTapF(&aC, &aW, vec2<f32>( 1.0,  2.0) - pp_rel, dir, len2, lob, clp, vec3<f32>(zzonR.z, zzonG.z, zzonB.z));
+    FsrEasuTapF(&aC, &aW, vec2<f32>( 0.0,  2.0) - pp_rel, dir, len2, lob, clp, vec3<f32>(zzonR.w, zzonG.w, zzonB.w));
+
+    let rgb = clamp(aC / max(aW, 1e-5), min4, max4);
+    return vec4<f32>(rgb, 1.0);
+}
+"#;
+
+const RCAS_SHADER: &str = r#"
+struct RcasConstants {
+    con: vec4<f32>,
+    output_size: vec2<f32>,
+    _pad: vec2<f32>,
+};
+
+@group(0) @binding(0) var rcas_tex: texture_2d<f32>;
+@group(0) @binding(1) var<uniform> rcas_con: RcasConstants;
+
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
+    var positions = array<vec2<f32>, 6>(
+        vec2<f32>(-1.0, -1.0),
+        vec2<f32>( 1.0, -1.0),
+        vec2<f32>(-1.0,  1.0),
+        vec2<f32>(-1.0,  1.0),
+        vec2<f32>( 1.0, -1.0),
+        vec2<f32>( 1.0,  1.0),
+    );
+    var uvs = array<vec2<f32>, 6>(
+        vec2<f32>(0.0, 1.0),
+        vec2<f32>(1.0, 1.0),
+        vec2<f32>(0.0, 0.0),
+        vec2<f32>(0.0, 0.0),
+        vec2<f32>(1.0, 1.0),
+        vec2<f32>(1.0, 0.0),
+    );
+    var out: VertexOutput;
+    out.position = vec4<f32>(positions[vertex_index], 0.0, 1.0);
+    out.uv = uvs[vertex_index];
+    return out;
+}
+
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    let max_coords = vec2<i32>(rcas_con.output_size) - vec2<i32>(1, 1);
+    let sp = clamp(vec2<i32>(floor(in.uv * rcas_con.output_size)), vec2<i32>(0), max_coords);
+
+    let b = textureLoad(rcas_tex, clamp(sp + vec2<i32>( 0, -1), vec2<i32>(0), max_coords), 0).rgb;
+    let d = textureLoad(rcas_tex, clamp(sp + vec2<i32>(-1,  0), vec2<i32>(0), max_coords), 0).rgb;
+    let e = textureLoad(rcas_tex, sp,                                                      0).rgb;
+    let f = textureLoad(rcas_tex, clamp(sp + vec2<i32>( 1,  0), vec2<i32>(0), max_coords), 0).rgb;
+    let h = textureLoad(rcas_tex, clamp(sp + vec2<i32>( 0,  1), vec2<i32>(0), max_coords), 0).rgb;
+
+    let bL = b.b * 0.5 + (b.r * 0.5 + b.g);
+    let dL = d.b * 0.5 + (d.r * 0.5 + d.g);
+    let eL = e.b * 0.5 + (e.r * 0.5 + e.g);
+    let fL = f.b * 0.5 + (f.r * 0.5 + f.g);
+    let hL = h.b * 0.5 + (h.r * 0.5 + h.g);
+
+    var nz = 0.25 * bL + 0.25 * dL + 0.25 * fL + 0.25 * hL - eL;
+    let mxL = max(max(max(bL, dL), max(eL, fL)), hL);
+    let mnL = min(min(min(bL, dL), min(eL, fL)), hL);
+    nz = clamp(abs(nz) / max(mxL - mnL, 1e-5), 0.0, 1.0);
+    nz = -0.5 * nz + 1.0;
+
+    let mn4R = min(min(b.r, d.r), min(f.r, h.r));
+    let mn4G = min(min(b.g, d.g), min(f.g, h.g));
+    let mn4B = min(min(b.b, d.b), min(f.b, h.b));
+
+    let mx4R = max(max(b.r, d.r), max(f.r, h.r));
+    let mx4G = max(max(b.g, d.g), max(f.g, h.g));
+    let mx4B = max(max(b.b, d.b), max(f.b, h.b));
+
+    let peakC = vec2<f32>(1.0, -4.0);
+    let hitMinR = min(mn4R, e.r) / max(4.0 * mx4R, 1e-5);
+    let hitMinG = min(mn4G, e.g) / max(4.0 * mx4G, 1e-5);
+    let hitMinB = min(mn4B, e.b) / max(4.0 * mx4B, 1e-5);
+
+    let hitMaxR = (peakC.x - max(mx4R, e.r)) / max(4.0 * mn4R + peakC.y, 1e-5);
+    let hitMaxG = (peakC.x - max(mx4G, e.g)) / max(4.0 * mn4G + peakC.y, 1e-5);
+    let hitMaxB = (peakC.x - max(mx4B, e.b)) / max(4.0 * mn4B + peakC.y, 1e-5);
+
+    let lobeR = max(-hitMinR, hitMaxR);
+    let lobeG = max(-hitMinG, hitMaxG);
+    let lobeB = max(-hitMinB, hitMaxB);
+
+    let FSR_RCAS_LIMIT = 0.25 - (1.0 / 16.0);
+    var lobe = max(-FSR_RCAS_LIMIT, min(max(max(lobeR, lobeG), lobeB), 0.0)) * rcas_con.con.x;
+    lobe = lobe * nz;
+
+    let rcpL = 1.0 / (4.0 * lobe + 1.0);
+    let pixR = (lobe * b.r + lobe * d.r + lobe * h.r + lobe * f.r + e.r) * rcpL;
+    let pixG = (lobe * b.g + lobe * d.g + lobe * h.g + lobe * f.g + e.g) * rcpL;
+    let pixB = (lobe * b.b + lobe * d.b + lobe * h.b + lobe * f.b + e.b) * rcpL;
+
+    return vec4<f32>(clamp(vec3<f32>(pixR, pixG, pixB), vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
+}
+"#;
+
