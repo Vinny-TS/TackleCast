@@ -35,6 +35,10 @@ pub struct Renderer {
     color_space: ColorSpace,
     color_range: ColorRange,
     sharpness: f32,
+    brightness: f32,
+    contrast: f32,
+    saturation: f32,
+    gamma: f32,
     video_frame: Option<VideoFrameResources>,
     egui_renderer: EguiRenderer,
     upscale_manager: Option<UpscaleManager>,
@@ -51,12 +55,17 @@ impl Renderer {
     /// `scale_filter`, `color_space`, and `color_range` are from saved settings.
     /// Taken as constructor arguments rather than defaulted, so a renderer can't
     /// come up disagreeing with the settings the menu is showing.
+    #[allow(clippy::too_many_arguments)]
     pub async fn new(
         window: Arc<Window>,
         scale_filter: ScaleFilter,
         color_space: ColorSpace,
         color_range: ColorRange,
         sharpness: f32,
+        brightness: f32,
+        contrast: f32,
+        saturation: f32,
+        gamma: f32,
     ) -> Result<Self, RenderError> {
         let size = window.inner_size();
         // Prefer DX12 on Windows so that CUDA ↔ DX12 zero-copy interop works.
@@ -249,6 +258,10 @@ impl Renderer {
             color_space,
             color_range,
             sharpness,
+            brightness,
+            contrast,
+            saturation,
+            gamma,
             video_frame: None,
             egui_renderer,
             upscale_manager: None,
@@ -287,6 +300,19 @@ impl Renderer {
 
     pub fn set_sharpness(&mut self, sharpness: f32) {
         self.sharpness = sharpness;
+    }
+
+    pub fn set_picture_settings(
+        &mut self,
+        brightness: f32,
+        contrast: f32,
+        saturation: f32,
+        gamma: f32,
+    ) {
+        self.brightness = brightness;
+        self.contrast = contrast;
+        self.saturation = saturation;
+        self.gamma = gamma;
     }
 
     pub fn set_color_settings(&mut self, color_space: ColorSpace, color_range: ColorRange) {
@@ -636,6 +662,10 @@ impl Renderer {
                     color_range: resolved_range.as_u32(),
                     viewport_size: [video_frame.width as f32, video_frame.height as f32],
                     _padding: [0.0; 2],
+                    brightness: self.brightness,
+                    contrast: self.contrast,
+                    saturation: self.saturation,
+                    gamma: self.gamma,
                 };
                 self.queue
                     .write_buffer(&self.uniforms, 0, bytemuck::bytes_of(&yuv_uniforms));
@@ -761,6 +791,10 @@ impl Renderer {
                     color_range: resolved_range.as_u32(),
                     viewport_size: [viewport.width, viewport.height],
                     _padding: [0.0; 2],
+                    brightness: self.brightness,
+                    contrast: self.contrast,
+                    saturation: self.saturation,
+                    gamma: self.gamma,
                 };
 
                 self.queue
@@ -876,8 +910,12 @@ struct VideoUniforms {
     color_space: u32,
     color_range: u32,
     viewport_size: [f32; 2],
-    // Uniform buffers round up to 16-byte alignment, so we pad to 32 bytes total.
+    // Uniform buffers round up to 16-byte alignment, so 32 + 16 = 48 bytes total.
     _padding: [f32; 2],
+    brightness: f32,
+    contrast: f32,
+    saturation: f32,
+    gamma: f32,
 }
 
 impl VideoUniforms {
@@ -1552,7 +1590,7 @@ mod tests {
 
     #[test]
     fn video_uniforms_layout() {
-        assert_eq!(std::mem::size_of::<VideoUniforms>(), 32);
+        assert_eq!(std::mem::size_of::<VideoUniforms>(), 48);
     }
 
     #[test]
@@ -1639,6 +1677,10 @@ struct VideoUniforms {
     color_range: u32,
     viewport_size: vec2<f32>,
     _padding: vec2<f32>,
+    brightness: f32,
+    contrast: f32,
+    saturation: f32,
+    gamma: f32,
 };
 
 @group(0) @binding(0) var y_tex: texture_2d<f32>;
@@ -1909,7 +1951,14 @@ fn decode_yuv_to_rgb(uv: vec2<f32>) -> vec3<f32> {
 
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
-    let rgb = decode_yuv_to_rgb(in.uv);
+    var rgb = decode_yuv_to_rgb(in.uv);
+
+    // Picture adjustments: brightness, contrast, saturation, gamma
+    rgb = (rgb - 0.5) * uniforms.contrast + 0.5 + uniforms.brightness;
+    let luma = dot(rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+    rgb = mix(vec3<f32>(luma), rgb, uniforms.saturation);
+    rgb = pow(max(rgb, vec3<f32>(0.0)), vec3<f32>(1.0 / max(uniforms.gamma, 0.01)));
+
     return vec4<f32>(clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
 }
 "#;

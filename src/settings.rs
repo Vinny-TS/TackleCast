@@ -46,6 +46,14 @@ pub struct Settings {
     pub detailed_overlay: bool,
     #[serde(default = "default_sharpness")]
     pub sharpness: f32,
+    #[serde(default = "default_brightness")]
+    pub brightness: f32,
+    #[serde(default = "default_contrast")]
+    pub contrast: f32,
+    #[serde(default = "default_saturation")]
+    pub saturation: f32,
+    #[serde(default = "default_gamma")]
+    pub gamma: f32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -253,6 +261,10 @@ impl Default for Settings {
             show_overlay: default_show_overlay(),
             detailed_overlay: false,
             sharpness: default_sharpness(),
+            brightness: default_brightness(),
+            contrast: default_contrast(),
+            saturation: default_saturation(),
+            gamma: default_gamma(),
         }
     }
 }
@@ -404,6 +416,22 @@ fn default_sharpness() -> f32 {
     1.0
 }
 
+fn default_brightness() -> f32 {
+    0.0
+}
+
+fn default_contrast() -> f32 {
+    1.0
+}
+
+fn default_saturation() -> f32 {
+    1.0
+}
+
+fn default_gamma() -> f32 {
+    1.0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -414,6 +442,21 @@ mod tests {
         let json = serde_json::to_string_pretty(&settings).unwrap();
         let decoded: Settings = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, settings);
+    }
+
+    #[test]
+    fn picture_settings_serialize_and_defaults() {
+        let json = r#"{
+            "brightness": 0.1,
+            "contrast": 1.2,
+            "saturation": 0.8,
+            "gamma": 1.5
+        }"#;
+        let s: Settings = serde_json::from_str(json).unwrap();
+        assert_eq!(s.brightness, 0.1);
+        assert_eq!(s.contrast, 1.2);
+        assert_eq!(s.saturation, 0.8);
+        assert_eq!(s.gamma, 1.5);
     }
 
     #[test]

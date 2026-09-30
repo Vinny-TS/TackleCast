@@ -23,11 +23,19 @@ const COLOR_DIM_OVERLAY: Color32 = Color32::from_black_alpha(120);
 const COLOR_PILL_BG: Color32 = Color32::from_black_alpha(180);
 const COLOR_EXIT_BG: Color32 = Color32::from_rgb(0x3A, 0x10, 0x20);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MenuTab {
+    #[default]
+    General,
+    Picture,
+}
+
 pub struct UiState {
     egui_ctx: egui::Context,
     egui_winit: State,
     menu_open: bool,
     draft_settings: Settings,
+    tab: MenuTab,
 }
 
 pub struct OverlayInfo {
@@ -64,6 +72,7 @@ pub struct PreparedUi {
 #[derive(Default)]
 pub struct UiOutput {
     pub apply_settings: Option<Settings>,
+    pub live_picture: Option<(f32, f32, f32, f32)>,
     pub toggle_fullscreen: bool,
     pub exit_requested: bool,
     pub request_repaint: bool,
@@ -88,6 +97,7 @@ impl UiState {
             egui_winit,
             menu_open: false,
             draft_settings: Settings::default(),
+            tab: MenuTab::default(),
         }
     }
 
@@ -137,6 +147,7 @@ impl UiState {
                 draw_menu(
                     ctx,
                     &mut self.draft_settings,
+                    &mut self.tab,
                     frame.video_devices,
                     frame.audio_inputs,
                     frame.audio_outputs,
@@ -145,6 +156,15 @@ impl UiState {
                 );
             }
         });
+
+        if self.menu_open {
+            ui_output.live_picture = Some((
+                self.draft_settings.brightness,
+                self.draft_settings.contrast,
+                self.draft_settings.saturation,
+                self.draft_settings.gamma,
+            ));
+        }
 
         self.egui_winit
             .handle_platform_output(window, full_output.platform_output);
@@ -239,9 +259,11 @@ fn draw_overlay(ctx: &egui::Context, overlay: &OverlayInfo) {
         });
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_menu(
     ctx: &egui::Context,
     draft: &mut Settings,
+    tab: &mut MenuTab,
     video_devices: &[String],
     audio_inputs: &[AudioDevice],
     audio_outputs: &[AudioDevice],
@@ -290,140 +312,160 @@ fn draw_menu(
                                     .color(COLOR_TEXT_PRIMARY),
                             );
                         });
-                        ui.add_space(8.0);
+                        ui.add_space(4.0);
 
-                        section_header(ui, "VIDEO", text_scale);
-                        if draft.video_device.is_empty() && !video_devices.is_empty() {
-                            draft.video_device = video_devices[0].clone();
-                        }
-                        let current_video_device = draft.video_device.clone();
-                        labeled_combo_string(
-                            ui,
-                            "Video Device",
-                            &mut draft.video_device,
-                            video_device_options(video_devices, &current_video_device),
-                        );
-                        if draft.video_device != current_video_device {
-                            ctx.request_repaint();
-                        }
-
-                        let active_device = if draft.video_device.is_empty() {
-                            video_devices.first().map(|s| s.as_str()).unwrap_or("")
-                        } else {
-                            draft.video_device.as_str()
-                        };
-                        let caps = crate::devices::get_device_capabilities(active_device);
-                        crate::devices::sanitize_draft_settings(draft, &caps);
-
-                        let available_resolutions = crate::devices::supported_resolutions(&caps);
-                        let prev_resolution = draft.resolution.clone();
-                        let prev_fps_mode = draft.fps_mode.clone();
-
-                        ui.columns(2, |columns| {
-                            labeled_combo_static(
-                                &mut columns[0],
-                                "Resolution",
-                                &mut draft.resolution,
-                                &available_resolutions,
-                            );
-                            let available_fps = crate::devices::supported_fps_modes(&caps, &draft.resolution);
-                            fps_mode_combo(&mut columns[1], &mut draft.fps_mode, &available_fps);
-                        });
-
-                        if draft.resolution != prev_resolution || draft.fps_mode != prev_fps_mode {
-                            crate::devices::sanitize_draft_settings(draft, &caps);
-                            ctx.request_repaint();
-                        }
-
-                        let available_formats = crate::devices::supported_video_formats(
-                            &caps,
-                            &draft.resolution,
-                            draft.get_fps(),
-                        );
-                        let max_res_fps = crate::devices::max_fps_for_resolution(&caps, &draft.resolution);
-
-                        ui.columns(2, |columns| {
-                            video_format_combo(
-                                &mut columns[0],
-                                "Video Format",
-                                &mut draft.video_format,
-                                &available_formats,
-                            );
-                            scaling_filter_combo(
-                                &mut columns[1],
-                                "Scaling Filter",
-                                &mut draft.scaling_filter,
-                            );
-                        });
-
-                        ui.columns(2, |columns| {
-                            color_space_combo(
-                                &mut columns[0],
-                                "Color Space",
-                                &mut draft.color_space,
-                            );
-                            color_range_combo(
-                                &mut columns[1],
-                                "Color Range",
-                                &mut draft.color_range,
-                            );
-                        });
-
-                        if draft.scaling_filter == ScaleFilter::Fsr1 {
-                            ui.horizontal(|ui| {
-                                ui.label(RichText::new("Sharpness").color(COLOR_TEXT_SECONDARY));
-                                ui.add(
-                                    Slider::new(&mut draft.sharpness, 0.0..=2.0)
-                                        .step_by(0.05)
-                                        .show_value(true),
-                                );
-                            });
-                        }
-
-                        if draft.fps_mode == FPS_MODE_CUSTOM {
-                            labeled_custom_fps(ui, draft, max_res_fps);
-                            warning_text(
-                                ui,
-                                "Custom FPS is experimental and is not guaranteed to work with all devices.",
-                                text_scale,
-                            );
-                        } else if draft.fps_mode == FPS_MODE_120 {
-                            warning_text(
-                                ui,
-                                "A fast CPU is required for 120 FPS. Performance may vary by hardware.",
-                                text_scale,
-                            );
-                        }
-
-                        separator(ui);
-                        section_header(ui, "AUDIO", text_scale);
-                        labeled_audio_combo(ui, "Audio Input", &mut draft.audio_input, audio_inputs);
-                        labeled_audio_combo(ui, "Audio Output", &mut draft.audio_output, audio_outputs);
-                        labeled_volume(ui, draft);
-
-                        separator(ui);
-                        section_header(ui, "DISPLAY", text_scale);
                         ui.horizontal(|ui| {
-                            let fullscreen_label = if is_fullscreen {
-                                "Exit Fullscreen"
-                            } else {
-                                "Enter Fullscreen"
-                            };
-                            if styled_button(ui, fullscreen_label).clicked() {
-                                output.toggle_fullscreen = true;
-                            }
-                            ui.add(Checkbox::new(
-                                &mut draft.show_overlay,
-                                RichText::new("Show FPS Overlay").color(COLOR_TEXT_PRIMARY),
-                            ));
+                            ui.selectable_value(tab, MenuTab::General, RichText::new("General").size(14.0 * text_scale));
+                            ui.selectable_value(tab, MenuTab::Picture, RichText::new("Picture").size(14.0 * text_scale));
                         });
+                        ui.add_space(4.0);
+                        separator(ui);
 
-                        if draft.show_overlay {
-                            ui.add(Checkbox::new(
-                                &mut draft.detailed_overlay,
-                                RichText::new("Include Scaling Filter In Overlay")
-                                    .color(COLOR_TEXT_PRIMARY),
-                            ));
+                        match tab {
+                            MenuTab::General => {
+                                section_header(ui, "VIDEO", text_scale);
+                                if draft.video_device.is_empty() && !video_devices.is_empty() {
+                                    draft.video_device = video_devices[0].clone();
+                                }
+                                let current_video_device = draft.video_device.clone();
+                                labeled_combo_string(
+                                    ui,
+                                    "Video Device",
+                                    &mut draft.video_device,
+                                    video_device_options(video_devices, &current_video_device),
+                                );
+                                if draft.video_device != current_video_device {
+                                    ctx.request_repaint();
+                                }
+
+                                let active_device = if draft.video_device.is_empty() {
+                                    video_devices.first().map(|s| s.as_str()).unwrap_or("")
+                                } else {
+                                    draft.video_device.as_str()
+                                };
+                                let caps = crate::devices::get_device_capabilities(active_device);
+                                crate::devices::sanitize_draft_settings(draft, &caps);
+
+                                let available_resolutions = crate::devices::supported_resolutions(&caps);
+                                let prev_resolution = draft.resolution.clone();
+                                let prev_fps_mode = draft.fps_mode.clone();
+
+                                ui.columns(2, |columns| {
+                                    labeled_combo_static(
+                                        &mut columns[0],
+                                        "Resolution",
+                                        &mut draft.resolution,
+                                        &available_resolutions,
+                                    );
+                                    let available_fps = crate::devices::supported_fps_modes(&caps, &draft.resolution);
+                                    fps_mode_combo(&mut columns[1], &mut draft.fps_mode, &available_fps);
+                                });
+
+                                if draft.resolution != prev_resolution || draft.fps_mode != prev_fps_mode {
+                                    crate::devices::sanitize_draft_settings(draft, &caps);
+                                    ctx.request_repaint();
+                                }
+
+                                let available_formats = crate::devices::supported_video_formats(
+                                    &caps,
+                                    &draft.resolution,
+                                    draft.get_fps(),
+                                );
+                                let max_res_fps = crate::devices::max_fps_for_resolution(&caps, &draft.resolution);
+
+                                ui.columns(2, |columns| {
+                                    video_format_combo(
+                                        &mut columns[0],
+                                        "Video Format",
+                                        &mut draft.video_format,
+                                        &available_formats,
+                                    );
+                                    scaling_filter_combo(
+                                        &mut columns[1],
+                                        "Scaling Filter",
+                                        &mut draft.scaling_filter,
+                                    );
+                                });
+
+                                ui.columns(2, |columns| {
+                                    color_space_combo(
+                                        &mut columns[0],
+                                        "Color Space",
+                                        &mut draft.color_space,
+                                    );
+                                    color_range_combo(
+                                        &mut columns[1],
+                                        "Color Range",
+                                        &mut draft.color_range,
+                                    );
+                                });
+
+                                if draft.fps_mode == FPS_MODE_CUSTOM {
+                                    labeled_custom_fps(ui, draft, max_res_fps);
+                                    warning_text(
+                                        ui,
+                                        "Custom FPS is experimental and is not guaranteed to work with all devices.",
+                                        text_scale,
+                                    );
+                                } else if draft.fps_mode == FPS_MODE_120 {
+                                    warning_text(
+                                        ui,
+                                        "A fast CPU is required for 120 FPS. Performance may vary by hardware.",
+                                        text_scale,
+                                    );
+                                }
+
+                                separator(ui);
+                                section_header(ui, "AUDIO", text_scale);
+                                labeled_audio_combo(ui, "Audio Input", &mut draft.audio_input, audio_inputs);
+                                labeled_audio_combo(ui, "Audio Output", &mut draft.audio_output, audio_outputs);
+                                labeled_volume(ui, draft);
+
+                                separator(ui);
+                                section_header(ui, "DISPLAY", text_scale);
+                                ui.horizontal(|ui| {
+                                    let fullscreen_label = if is_fullscreen {
+                                        "Exit Fullscreen"
+                                    } else {
+                                        "Enter Fullscreen"
+                                    };
+                                    if styled_button(ui, fullscreen_label).clicked() {
+                                        output.toggle_fullscreen = true;
+                                    }
+                                    ui.add(Checkbox::new(
+                                        &mut draft.show_overlay,
+                                        RichText::new("Show FPS Overlay").color(COLOR_TEXT_PRIMARY),
+                                    ));
+                                });
+
+                                if draft.show_overlay {
+                                    ui.add(Checkbox::new(
+                                        &mut draft.detailed_overlay,
+                                        RichText::new("Include Scaling Filter In Overlay")
+                                            .color(COLOR_TEXT_PRIMARY),
+                                    ));
+                                }
+                            }
+                            MenuTab::Picture => {
+                                section_header(ui, "PICTURE ADJUSTMENTS", text_scale);
+                                picture_slider(ui, "Brightness", &mut draft.brightness, -1.0..=1.0, 0.02);
+                                picture_slider(ui, "Contrast", &mut draft.contrast, 0.0..=2.0, 0.02);
+                                picture_slider(ui, "Saturation", &mut draft.saturation, 0.0..=2.0, 0.02);
+                                picture_slider(ui, "Gamma", &mut draft.gamma, 0.2..=3.0, 0.05);
+
+                                if draft.scaling_filter == ScaleFilter::Fsr1 {
+                                    picture_slider(ui, "Sharpness (RCAS)", &mut draft.sharpness, 0.0..=2.0, 0.05);
+                                }
+
+                                ui.add_space(8.0);
+                                if styled_button(ui, "Reset Picture to Defaults").clicked() {
+                                    draft.brightness = 0.0;
+                                    draft.contrast = 1.0;
+                                    draft.saturation = 1.0;
+                                    draft.gamma = 1.0;
+                                    draft.sharpness = 1.0;
+                                }
+                            }
                         }
 
                         separator(ui);
@@ -648,6 +690,21 @@ fn labeled_volume(ui: &mut egui::Ui, draft: &mut Settings) {
     });
 }
 
+fn picture_slider(
+    ui: &mut egui::Ui,
+    label: &str,
+    val: &mut f32,
+    range: std::ops::RangeInclusive<f32>,
+    step: f64,
+) {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(label).color(COLOR_TEXT_SECONDARY));
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.add(Slider::new(val, range).step_by(step));
+        });
+    });
+}
+
 fn styled_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
     ui.add(
         Button::new(RichText::new(text).color(COLOR_TEXT_PRIMARY))
@@ -789,9 +846,11 @@ mod tests {
             return;
         }
 
+        let mut tab = MenuTab::General;
+
         // Frame 1: 1080p60 -> all formats supported by hardware should be available
         let _ = ctx.run(egui::RawInput::default(), |ctx| {
-            draw_menu(&ctx, &mut draft, &video_devices, &[], &[], false, &mut output);
+            draw_menu(&ctx, &mut draft, &mut tab, &video_devices, &[], &[], false, &mut output);
         });
         let fmts_frame1 = crate::devices::supported_video_formats(&caps, &draft.resolution, draft.get_fps());
         assert!(fmts_frame1.contains(&VideoFormat::Auto));
@@ -803,7 +862,7 @@ mod tests {
         // Frame 2: Switch to 4K60 -> only Auto and MJPEG available
         draft.resolution = "4K".to_string();
         let _ = ctx.run(egui::RawInput::default(), |ctx| {
-            draw_menu(&ctx, &mut draft, &video_devices, &[], &[], false, &mut output);
+            draw_menu(&ctx, &mut draft, &mut tab, &video_devices, &[], &[], false, &mut output);
         });
         let fmts_frame2 = crate::devices::supported_video_formats(&caps, &draft.resolution, draft.get_fps());
         assert_eq!(fmts_frame2, vec![VideoFormat::Auto, VideoFormat::Mjpeg]);
@@ -811,7 +870,7 @@ mod tests {
         // Frame 3: Switch back to 1080p60 -> all formats MUST reappear!
         draft.resolution = "1080p".to_string();
         let _ = ctx.run(egui::RawInput::default(), |ctx| {
-            draw_menu(&ctx, &mut draft, &video_devices, &[], &[], false, &mut output);
+            draw_menu(&ctx, &mut draft, &mut tab, &video_devices, &[], &[], false, &mut output);
         });
         let fmts_frame3 = crate::devices::supported_video_formats(&caps, &draft.resolution, draft.get_fps());
         assert_eq!(fmts_frame3, fmts_frame1);
@@ -825,7 +884,7 @@ mod tests {
         draft.video_format = VideoFormat::Nv12;
         draft.resolution = "4K".to_string();
         let _ = ctx.run(egui::RawInput::default(), |ctx| {
-            draw_menu(&ctx, &mut draft, &video_devices, &[], &[], false, &mut output);
+            draw_menu(&ctx, &mut draft, &mut tab, &video_devices, &[], &[], false, &mut output);
         });
         // Since NV12 is only supported up to 30fps at 4K on VEDO-VDV66003, at 60fps it must fall back to Auto
         assert_eq!(draft.video_format, VideoFormat::Auto);
@@ -833,9 +892,23 @@ mod tests {
         // Frame 5: Switch back to 1080p and select NV12 again
         draft.resolution = "1080p".to_string();
         let _ = ctx.run(egui::RawInput::default(), |ctx| {
-            draw_menu(&ctx, &mut draft, &video_devices, &[], &[], false, &mut output);
+            draw_menu(&ctx, &mut draft, &mut tab, &video_devices, &[], &[], false, &mut output);
         });
         let fmts_frame5 = crate::devices::supported_video_formats(&caps, &draft.resolution, draft.get_fps());
         assert!(fmts_frame5.contains(&VideoFormat::Nv12));
+    }
+
+    #[test]
+    fn test_menu_picture_tab_renders() {
+        let ctx = egui::Context::default();
+        let mut draft = Settings::default();
+        let mut tab = MenuTab::Picture;
+        let mut output = UiOutput::default();
+
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            draw_menu(&ctx, &mut draft, &mut tab, &[], &[], &[], false, &mut output);
+        });
+
+        assert_eq!(tab, MenuTab::Picture);
     }
 }

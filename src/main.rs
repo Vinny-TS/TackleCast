@@ -330,6 +330,10 @@ impl ApplicationHandler<AppEvent> for App {
             self.settings.color_space,
             self.settings.color_range,
             self.settings.sharpness,
+            self.settings.brightness,
+            self.settings.contrast,
+            self.settings.saturation,
+            self.settings.gamma,
         )) {
             Ok(renderer) => renderer,
             Err(error) => {
@@ -466,7 +470,11 @@ impl ApplicationHandler<AppEvent> for App {
                     let toggle_fullscreen = prepared_ui.output.toggle_fullscreen;
                     let exit_requested = prepared_ui.output.exit_requested;
                     let apply_settings = prepared_ui.output.apply_settings.clone();
+                    let live_picture = prepared_ui.output.live_picture;
                     let request_repaint = prepared_ui.output.request_repaint;
+                    if let Some((b, c, s, g)) = live_picture {
+                        renderer.set_picture_settings(b, c, s, g);
+                    }
                     if let Err(error) = renderer.render(Some(prepared_ui)) {
                         error!("render error: {error}");
                     }
@@ -629,6 +637,10 @@ impl App {
         let sharpness_changed = (old_settings.sharpness - self.settings.sharpness).abs() > 0.001;
         let color_changed = old_settings.color_space != self.settings.color_space
             || old_settings.color_range != self.settings.color_range;
+        let picture_changed = (old_settings.brightness - self.settings.brightness).abs() > 0.001
+            || (old_settings.contrast - self.settings.contrast).abs() > 0.001
+            || (old_settings.saturation - self.settings.saturation).abs() > 0.001
+            || (old_settings.gamma - self.settings.gamma).abs() > 0.001;
 
         if video_changed {
             if let Some(capture) = &mut self.capture {
@@ -662,7 +674,18 @@ impl App {
             }
         }
 
-        if scaling_changed || sharpness_changed || color_changed {
+        if picture_changed {
+            if let Some(renderer) = &mut self.renderer {
+                renderer.set_picture_settings(
+                    self.settings.brightness,
+                    self.settings.contrast,
+                    self.settings.saturation,
+                    self.settings.gamma,
+                );
+            }
+        }
+
+        if scaling_changed || sharpness_changed || color_changed || picture_changed {
             if let Some(window) = &self.window {
                 window.request_redraw();
             }
