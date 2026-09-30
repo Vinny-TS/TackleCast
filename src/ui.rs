@@ -12,22 +12,33 @@ use egui_winit::State;
 use winit::event::WindowEvent;
 use winit::window::Window;
 
-const COLOR_TEXT_PRIMARY: Color32 = Color32::from_rgb(0xE0, 0xE0, 0xE0);
-const COLOR_TEXT_SECONDARY: Color32 = Color32::from_rgb(0x88, 0x99, 0xAA);
-const COLOR_TEXT_HINT: Color32 = Color32::from_rgb(0x44, 0x55, 0x66);
-const COLOR_ACCENT: Color32 = Color32::from_rgb(0xE9, 0x45, 0x60);
-const COLOR_PANEL_BG: Color32 = Color32::from_rgb(0x16, 0x21, 0x3E);
-const COLOR_BORDER: Color32 = Color32::from_rgb(0x0F, 0x34, 0x60);
-const COLOR_MENU_BORDER: Color32 = Color32::from_rgb(0x1A, 0x2A, 0x50);
-const COLOR_DIM_OVERLAY: Color32 = Color32::from_black_alpha(120);
-const COLOR_PILL_BG: Color32 = Color32::from_black_alpha(180);
-const COLOR_EXIT_BG: Color32 = Color32::from_rgb(0x3A, 0x10, 0x20);
+const COLOR_TEXT_PRIMARY: Color32 = Color32::from_rgb(0xF3, 0xF4, 0xF6);
+const COLOR_TEXT_SECONDARY: Color32 = Color32::from_rgb(0x9C, 0xA3, 0xAF);
+const COLOR_TEXT_MUTED: Color32 = Color32::from_rgb(0x6B, 0x72, 0x80);
+const COLOR_ACCENT: Color32 = Color32::from_rgb(0x3B, 0x82, 0xF6);
+const COLOR_ACCENT_HOVER: Color32 = Color32::from_rgb(0x60, 0xA5, 0xFA);
+const COLOR_CARD_BG: Color32 = Color32::from_rgb(0x15, 0x18, 0x22);
+const COLOR_PANEL_BG: Color32 = Color32::from_rgb(0x1A, 0x1E, 0x2A);
+const COLOR_PANEL_HOVER: Color32 = Color32::from_rgb(0x22, 0x27, 0x36);
+const COLOR_BORDER: Color32 = Color32::from_rgb(0x2B, 0x32, 0x44);
+const COLOR_BORDER_SUBTLE: Color32 = Color32::from_rgb(0x20, 0x25, 0x34);
+const COLOR_MENU_BORDER: Color32 = Color32::from_rgb(0x28, 0x2E, 0x3E);
+const COLOR_TAB_BAR_BG: Color32 = Color32::from_rgb(0x10, 0x12, 0x19);
+const COLOR_TAB_ACTIVE_BG: Color32 = Color32::from_rgb(0x22, 0x28, 0x38);
+const COLOR_DIM_OVERLAY: Color32 = Color32::from_rgba_premultiplied(8, 10, 14, 180);
+const COLOR_PILL_BG: Color32 = Color32::from_rgba_premultiplied(14, 16, 22, 220);
+const COLOR_EXIT_BG: Color32 = Color32::from_rgb(0x2A, 0x14, 0x18);
+const COLOR_EXIT_BORDER: Color32 = Color32::from_rgb(0xEF, 0x44, 0x44);
+const COLOR_EXIT_TEXT: Color32 = Color32::from_rgb(0xFC, 0xA5, 0xA5);
+const COLOR_WARNING: Color32 = Color32::from_rgb(0xF5, 0x9E, 0x0B);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MenuTab {
     #[default]
-    General,
+    Video,
     Picture,
+    Audio,
+    Display,
 }
 
 pub struct UiState {
@@ -199,31 +210,35 @@ fn configure_style(ctx: &egui::Context) {
     style.visuals.window_fill = menu_background();
     style.visuals.window_stroke = Stroke::new(1.0_f32, COLOR_MENU_BORDER);
     style.visuals.window_corner_radius = CornerRadius::same(12);
-    style.visuals.menu_corner_radius = CornerRadius::same(12);
+    style.visuals.menu_corner_radius = CornerRadius::same(8);
     style.visuals.widgets.noninteractive.bg_fill = COLOR_PANEL_BG;
-    style.visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, COLOR_BORDER);
+    style.visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, COLOR_BORDER_SUBTLE);
+    style.visuals.widgets.noninteractive.corner_radius = CornerRadius::same(6);
     style.visuals.widgets.noninteractive.fg_stroke.color = COLOR_TEXT_PRIMARY;
     style.visuals.widgets.inactive.bg_fill = COLOR_PANEL_BG;
     style.visuals.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, COLOR_BORDER);
+    style.visuals.widgets.inactive.corner_radius = CornerRadius::same(6);
     style.visuals.widgets.inactive.fg_stroke.color = COLOR_TEXT_PRIMARY;
-    style.visuals.widgets.hovered.bg_fill = COLOR_PANEL_BG;
-    style.visuals.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, COLOR_ACCENT);
+    style.visuals.widgets.hovered.bg_fill = COLOR_PANEL_HOVER;
+    style.visuals.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, COLOR_ACCENT_HOVER);
+    style.visuals.widgets.hovered.corner_radius = CornerRadius::same(6);
     style.visuals.widgets.hovered.fg_stroke.color = COLOR_TEXT_PRIMARY;
-    style.visuals.widgets.active.bg_fill = COLOR_PANEL_BG;
+    style.visuals.widgets.active.bg_fill = COLOR_PANEL_HOVER;
     style.visuals.widgets.active.bg_stroke = Stroke::new(1.0_f32, COLOR_ACCENT);
+    style.visuals.widgets.active.corner_radius = CornerRadius::same(6);
     style.visuals.widgets.active.fg_stroke.color = COLOR_TEXT_PRIMARY;
     style.visuals.selection.bg_fill = COLOR_ACCENT;
     style.visuals.selection.stroke = Stroke::new(1.0_f32, COLOR_ACCENT);
     style.visuals.slider_trailing_fill = true;
-    style.spacing.item_spacing = egui::vec2(10.0, 10.0);
-    style.spacing.button_padding = egui::vec2(12.0, 8.0);
+    style.spacing.item_spacing = egui::vec2(8.0, 8.0);
+    style.spacing.button_padding = egui::vec2(10.0, 6.0);
     ctx.set_style(style);
 }
 
 fn draw_overlay(ctx: &egui::Context, overlay: &OverlayInfo) {
     let text = overlay_text(overlay);
     let color = if overlay.status_is_alert {
-        COLOR_ACCENT
+        COLOR_EXIT_BORDER
     } else {
         COLOR_TEXT_PRIMARY
     };
@@ -233,23 +248,20 @@ fn draw_overlay(ctx: &egui::Context, overlay: &OverlayInfo) {
     }
 
     egui::Area::new("fps_overlay".into())
-        .anchor(Align2::LEFT_TOP, [8.0, 8.0])
+        .anchor(Align2::LEFT_TOP, [12.0, 12.0])
         .interactable(false)
         .movable(false)
         .show(ctx, |ui| {
             Frame::new()
                 .fill(COLOR_PILL_BG)
-                .corner_radius(CornerRadius::same(24))
-                .inner_margin(Margin::symmetric(10, 6))
+                .stroke(Stroke::new(1.0_f32, Color32::from_white_alpha(30)))
+                .corner_radius(CornerRadius::same(8))
+                .inner_margin(Margin::symmetric(12, 6))
                 .show(ui, |ui| {
-                    // Extend rather than wrap: the pill sizes itself to the
-                    // text, so wrapping would fold it onto a second line inside
-                    // a pill that's already the right width. Scoped to this
-                    // label so the menu keeps its normal wrapping.
                     ui.add(
                         egui::Label::new(
                             RichText::new(text.unwrap_or_default())
-                                .font(FontId::proportional(14.0))
+                                .font(FontId::proportional(13.0))
                                 .strong()
                                 .color(color),
                         )
@@ -272,9 +284,9 @@ fn draw_menu(
 ) {
     let screen_rect = ctx.screen_rect();
     let window_width = screen_rect.width().max(1.0);
-    let scale = (window_width / 1280.0).clamp(0.8, 1.4);
-    let menu_width = 460.0 * scale;
-    let text_scale = scale.clamp(0.9, 1.2);
+    let scale = (window_width / 1280.0).clamp(0.85, 1.3);
+    let menu_width = 480.0 * scale;
+    let text_scale = scale.clamp(0.9, 1.15);
 
     egui::Area::new("settings_backdrop".into())
         .anchor(Align2::LEFT_TOP, [0.0, 0.0])
@@ -302,162 +314,145 @@ fn draw_menu(
                     ui.set_width(menu_width);
                     ui.spacing_mut().item_spacing = egui::vec2(10.0 * text_scale, 10.0 * text_scale);
                     ui.spacing_mut().button_padding =
-                        egui::vec2(12.0 * text_scale, 8.0 * text_scale);
+                        egui::vec2(12.0 * text_scale, 7.0 * text_scale);
                     ui.vertical(|ui| {
                         ui.with_layout(Layout::top_down(Align::Center), |ui| {
                             ui.label(
                                 RichText::new("Settings")
-                                    .font(FontId::proportional(24.0 * text_scale))
+                                    .font(FontId::proportional(20.0 * text_scale))
                                     .strong()
                                     .color(COLOR_TEXT_PRIMARY),
                             );
                         });
-                        ui.add_space(4.0);
+                        ui.add_space(2.0);
 
-                        ui.horizontal(|ui| {
-                            ui.selectable_value(tab, MenuTab::General, RichText::new("General").size(14.0 * text_scale));
-                            ui.selectable_value(tab, MenuTab::Picture, RichText::new("Picture").size(14.0 * text_scale));
-                        });
-                        ui.add_space(4.0);
-                        separator(ui);
+                        tab_bar(ui, tab, text_scale);
+                        ui.add_space(6.0);
 
                         match tab {
-                            MenuTab::General => {
-                                section_header(ui, "VIDEO", text_scale);
-                                if draft.video_device.is_empty() && !video_devices.is_empty() {
-                                    draft.video_device = video_devices[0].clone();
-                                }
-                                let current_video_device = draft.video_device.clone();
-                                labeled_combo_string(
-                                    ui,
-                                    "Video Device",
-                                    &mut draft.video_device,
-                                    video_device_options(video_devices, &current_video_device),
-                                );
-                                if draft.video_device != current_video_device {
-                                    ctx.request_repaint();
-                                }
-
-                                let active_device = if draft.video_device.is_empty() {
-                                    video_devices.first().map(|s| s.as_str()).unwrap_or("")
-                                } else {
-                                    draft.video_device.as_str()
-                                };
-                                let caps = crate::devices::get_device_capabilities(active_device);
-                                crate::devices::sanitize_draft_settings(draft, &caps);
-
-                                let available_resolutions = crate::devices::supported_resolutions(&caps);
-                                let prev_resolution = draft.resolution.clone();
-                                let prev_fps_mode = draft.fps_mode.clone();
-
-                                ui.columns(2, |columns| {
-                                    labeled_combo_static(
-                                        &mut columns[0],
-                                        "Resolution",
-                                        &mut draft.resolution,
-                                        &available_resolutions,
-                                    );
-                                    let available_fps = crate::devices::supported_fps_modes(&caps, &draft.resolution);
-                                    fps_mode_combo(&mut columns[1], &mut draft.fps_mode, &available_fps);
-                                });
-
-                                if draft.resolution != prev_resolution || draft.fps_mode != prev_fps_mode {
-                                    crate::devices::sanitize_draft_settings(draft, &caps);
-                                    ctx.request_repaint();
-                                }
-
-                                let available_formats = crate::devices::supported_video_formats(
-                                    &caps,
-                                    &draft.resolution,
-                                    draft.get_fps(),
-                                );
-                                let max_res_fps = crate::devices::max_fps_for_resolution(&caps, &draft.resolution);
-
-                                ui.columns(2, |columns| {
-                                    video_format_combo(
-                                        &mut columns[0],
-                                        "Video Format",
-                                        &mut draft.video_format,
-                                        &available_formats,
-                                    );
-                                    scaling_filter_combo(
-                                        &mut columns[1],
-                                        "Scaling Filter",
-                                        &mut draft.scaling_filter,
-                                    );
-                                });
-
-                                ui.columns(2, |columns| {
-                                    color_space_combo(
-                                        &mut columns[0],
-                                        "Color Space",
-                                        &mut draft.color_space,
-                                    );
-                                    color_range_combo(
-                                        &mut columns[1],
-                                        "Color Range",
-                                        &mut draft.color_range,
-                                    );
-                                });
-
-                                if draft.fps_mode == FPS_MODE_CUSTOM {
-                                    labeled_custom_fps(ui, draft, max_res_fps);
-                                    warning_text(
-                                        ui,
-                                        "Custom FPS is experimental and is not guaranteed to work with all devices.",
-                                        text_scale,
-                                    );
-                                } else if draft.fps_mode == FPS_MODE_120 {
-                                    warning_text(
-                                        ui,
-                                        "A fast CPU is required for 120 FPS. Performance may vary by hardware.",
-                                        text_scale,
-                                    );
-                                }
-
-                                separator(ui);
-                                section_header(ui, "AUDIO", text_scale);
-                                labeled_audio_combo(ui, "Audio Input", &mut draft.audio_input, audio_inputs);
-                                labeled_audio_combo(ui, "Audio Output", &mut draft.audio_output, audio_outputs);
-                                labeled_volume(ui, draft);
-
-                                separator(ui);
-                                section_header(ui, "DISPLAY", text_scale);
-                                ui.horizontal(|ui| {
-                                    let fullscreen_label = if is_fullscreen {
-                                        "Exit Fullscreen"
-                                    } else {
-                                        "Enter Fullscreen"
-                                    };
-                                    if styled_button(ui, fullscreen_label).clicked() {
-                                        output.toggle_fullscreen = true;
+                            MenuTab::Video => {
+                                card_section(ui, "CAPTURE SOURCE", text_scale, |ui| {
+                                    if draft.video_device.is_empty() && !video_devices.is_empty() {
+                                        draft.video_device = video_devices[0].clone();
                                     }
-                                    ui.add(Checkbox::new(
-                                        &mut draft.show_overlay,
-                                        RichText::new("Show FPS Overlay").color(COLOR_TEXT_PRIMARY),
-                                    ));
+                                    let current_video_device = draft.video_device.clone();
+                                    labeled_combo_string(
+                                        ui,
+                                        "Device",
+                                        &mut draft.video_device,
+                                        video_device_options(video_devices, &current_video_device),
+                                    );
+                                    if draft.video_device != current_video_device {
+                                        ctx.request_repaint();
+                                    }
+
+                                    let active_device = if draft.video_device.is_empty() {
+                                        video_devices.first().map(|s| s.as_str()).unwrap_or("")
+                                    } else {
+                                        draft.video_device.as_str()
+                                    };
+                                    let caps = crate::devices::get_device_capabilities(active_device);
+                                    crate::devices::sanitize_draft_settings(draft, &caps);
+
+                                    let available_resolutions = crate::devices::supported_resolutions(&caps);
+                                    let prev_resolution = draft.resolution.clone();
+                                    let prev_fps_mode = draft.fps_mode.clone();
+
+                                    ui.columns(2, |columns| {
+                                        labeled_combo_static(
+                                            &mut columns[0],
+                                            "Resolution",
+                                            &mut draft.resolution,
+                                            &available_resolutions,
+                                        );
+                                        let available_fps = crate::devices::supported_fps_modes(&caps, &draft.resolution);
+                                        fps_mode_combo(&mut columns[1], &mut draft.fps_mode, &available_fps);
+                                    });
+
+                                    if draft.resolution != prev_resolution || draft.fps_mode != prev_fps_mode {
+                                        crate::devices::sanitize_draft_settings(draft, &caps);
+                                        ctx.request_repaint();
+                                    }
+
+                                    let max_res_fps = crate::devices::max_fps_for_resolution(&caps, &draft.resolution);
+                                    if draft.fps_mode == FPS_MODE_CUSTOM {
+                                        labeled_custom_fps(ui, draft, max_res_fps, text_scale);
+                                        warning_text(
+                                            ui,
+                                            "Custom FPS is experimental and may not work with all devices.",
+                                            text_scale,
+                                        );
+                                    } else if draft.fps_mode == FPS_MODE_120 {
+                                        warning_text(
+                                            ui,
+                                            "High frame rate (120 FPS) requires sufficient CPU and capture bandwidth.",
+                                            text_scale,
+                                        );
+                                    }
                                 });
 
-                                if draft.show_overlay {
-                                    ui.add(Checkbox::new(
-                                        &mut draft.detailed_overlay,
-                                        RichText::new("Include Scaling Filter In Overlay")
-                                            .color(COLOR_TEXT_PRIMARY),
-                                    ));
-                                }
+                                card_section(ui, "FORMAT & SCALING", text_scale, |ui| {
+                                    let active_device = if draft.video_device.is_empty() {
+                                        video_devices.first().map(|s| s.as_str()).unwrap_or("")
+                                    } else {
+                                        draft.video_device.as_str()
+                                    };
+                                    let caps = crate::devices::get_device_capabilities(active_device);
+                                    let available_formats = crate::devices::supported_video_formats(
+                                        &caps,
+                                        &draft.resolution,
+                                        draft.get_fps(),
+                                    );
+
+                                    ui.columns(2, |columns| {
+                                        video_format_combo(
+                                            &mut columns[0],
+                                            "Pixel Format",
+                                            &mut draft.video_format,
+                                            &available_formats,
+                                        );
+                                        scaling_filter_combo(
+                                            &mut columns[1],
+                                            "Upscale Filter",
+                                            &mut draft.scaling_filter,
+                                        );
+                                    });
+
+                                    ui.columns(2, |columns| {
+                                        color_space_combo(
+                                            &mut columns[0],
+                                            "Color Space",
+                                            &mut draft.color_space,
+                                        );
+                                        color_range_combo(
+                                            &mut columns[1],
+                                            "Color Range",
+                                            &mut draft.color_range,
+                                        );
+                                    });
+                                });
                             }
                             MenuTab::Picture => {
-                                section_header(ui, "PICTURE ADJUSTMENTS", text_scale);
-                                picture_slider(ui, "Brightness", &mut draft.brightness, -1.0..=1.0, 0.02);
-                                picture_slider(ui, "Contrast", &mut draft.contrast, 0.0..=2.0, 0.02);
-                                picture_slider(ui, "Saturation", &mut draft.saturation, 0.0..=2.0, 0.02);
-                                picture_slider(ui, "Gamma", &mut draft.gamma, 0.2..=3.0, 0.05);
+                                card_section(ui, "IMAGE ADJUSTMENTS", text_scale, |ui| {
+                                    picture_slider(ui, "Brightness", &mut draft.brightness, -1.0..=1.0, 0.02, text_scale);
+                                    picture_slider(ui, "Contrast", &mut draft.contrast, 0.0..=2.0, 0.02, text_scale);
+                                    picture_slider(ui, "Saturation", &mut draft.saturation, 0.0..=2.0, 0.02, text_scale);
+                                    picture_slider(ui, "Gamma", &mut draft.gamma, 0.2..=3.0, 0.05, text_scale);
+                                });
 
-                                if draft.scaling_filter == ScaleFilter::Fsr1 {
-                                    picture_slider(ui, "Sharpness (RCAS)", &mut draft.sharpness, 0.0..=2.0, 0.05);
-                                }
+                                card_section(ui, "UPSCALER SHARPNESS", text_scale, |ui| {
+                                    if draft.scaling_filter == ScaleFilter::Fsr1 {
+                                        picture_slider(ui, "RCAS Sharpness", &mut draft.sharpness, 0.0..=2.0, 0.05, text_scale);
+                                    } else {
+                                        ui.label(
+                                            RichText::new("Sharpness is active when Upscale Filter is set to FSR 1.0.")
+                                                .size(12.0 * text_scale)
+                                                .color(COLOR_TEXT_MUTED),
+                                        );
+                                    }
+                                });
 
-                                ui.add_space(8.0);
+                                ui.add_space(2.0);
                                 if styled_button(ui, "Reset Picture to Defaults").clicked() {
                                     draft.brightness = 0.0;
                                     draft.contrast = 1.0;
@@ -466,19 +461,59 @@ fn draw_menu(
                                     draft.sharpness = 1.0;
                                 }
                             }
+                            MenuTab::Audio => {
+                                card_section(ui, "DEVICE ROUTING", text_scale, |ui| {
+                                    labeled_audio_combo(ui, "Input Device", &mut draft.audio_input, audio_inputs);
+                                    labeled_audio_combo(ui, "Output Device", &mut draft.audio_output, audio_outputs);
+                                });
+
+                                card_section(ui, "PLAYBACK VOLUME", text_scale, |ui| {
+                                    labeled_volume(ui, draft, text_scale);
+                                });
+                            }
+                            MenuTab::Display => {
+                                card_section(ui, "WINDOW & DISPLAY", text_scale, |ui| {
+                                    let fullscreen_label = if is_fullscreen {
+                                        "Exit Fullscreen (F11)"
+                                    } else {
+                                        "Enter Fullscreen (F11)"
+                                    };
+                                    if styled_button(ui, fullscreen_label).clicked() {
+                                        output.toggle_fullscreen = true;
+                                    }
+                                });
+
+                                card_section(ui, "ON-SCREEN OVERLAY", text_scale, |ui| {
+                                    ui.add(Checkbox::new(
+                                        &mut draft.show_overlay,
+                                        RichText::new("Show Performance Overlay (FPS & Resolution)").color(COLOR_TEXT_PRIMARY),
+                                    ));
+
+                                    if draft.show_overlay {
+                                        ui.horizontal(|ui| {
+                                            ui.add_space(16.0);
+                                            ui.add(Checkbox::new(
+                                                &mut draft.detailed_overlay,
+                                                RichText::new("Include Upscaler & Color Info").color(COLOR_TEXT_SECONDARY),
+                                            ));
+                                        });
+                                    }
+                                });
+
+                                card_section(ui, "SESSION", text_scale, |ui| {
+                                    if exit_button(ui).clicked() {
+                                        output.exit_requested = true;
+                                    }
+                                });
+                            }
                         }
 
-                        separator(ui);
-                        if exit_button(ui).clicked() {
-                            output.exit_requested = true;
-                        }
-
-                        ui.add_space(4.0);
+                        ui.add_space(6.0);
                         ui.with_layout(Layout::top_down(Align::Center), |ui| {
                             ui.label(
-                                RichText::new("Press Escape to close")
-                                    .size(13.0 * text_scale)
-                                    .color(COLOR_TEXT_HINT),
+                                RichText::new("Press Escape or click outside to save and close")
+                                    .size(12.0 * text_scale)
+                                    .color(COLOR_TEXT_MUTED),
                             );
                         });
                     });
@@ -486,32 +521,88 @@ fn draw_menu(
         });
 }
 
-fn section_header(ui: &mut egui::Ui, text: &str, text_scale: f32) {
-    ui.label(
-        RichText::new(spaced_caps(text))
-            .size(15.0 * text_scale)
-            .strong()
-            .color(COLOR_ACCENT),
-    );
+fn tab_bar(ui: &mut egui::Ui, current_tab: &mut MenuTab, text_scale: f32) {
+    let tabs = [
+        (MenuTab::Video, "Video"),
+        (MenuTab::Picture, "Picture"),
+        (MenuTab::Audio, "Audio"),
+        (MenuTab::Display, "Display"),
+    ];
+
+    Frame::new()
+        .fill(COLOR_TAB_BAR_BG)
+        .stroke(Stroke::new(1.0_f32, COLOR_BORDER_SUBTLE))
+        .corner_radius(CornerRadius::same(8))
+        .inner_margin(Margin::same(3))
+        .show(ui, |ui| {
+            let available_w = ui.available_width();
+            let count = tabs.len() as f32;
+            let tab_w = ((available_w - ((count - 1.0) * 4.0)) / count).floor();
+            ui.spacing_mut().item_spacing = egui::vec2(4.0, 0.0);
+
+            ui.horizontal(|ui| {
+                for (tab, label) in tabs {
+                    let is_active = *current_tab == tab;
+                    let (bg, text_color, stroke) = if is_active {
+                        (
+                            COLOR_TAB_ACTIVE_BG,
+                            COLOR_TEXT_PRIMARY,
+                            Stroke::new(1.0_f32, COLOR_BORDER),
+                        )
+                    } else {
+                        (Color32::TRANSPARENT, COLOR_TEXT_MUTED, Stroke::NONE)
+                    };
+
+                    let btn = Button::new(
+                        RichText::new(label)
+                            .size(13.0 * text_scale)
+                            .strong()
+                            .color(text_color),
+                    )
+                    .fill(bg)
+                    .stroke(stroke)
+                    .corner_radius(CornerRadius::same(6))
+                    .min_size(egui::vec2(tab_w, 28.0 * text_scale));
+
+                    if ui.add(btn).clicked() {
+                        *current_tab = tab;
+                    }
+                }
+            });
+        });
 }
 
-fn separator(ui: &mut egui::Ui) {
-    ui.add_space(4.0);
-    let width = ui.available_width().max(1.0);
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 1.0), egui::Sense::hover());
-    ui.painter().line_segment(
-        [rect.left_center(), rect.right_center()],
-        Stroke::new(1.0_f32, COLOR_MENU_BORDER),
+fn card_section<R>(
+    ui: &mut egui::Ui,
+    title: &str,
+    text_scale: f32,
+    add_contents: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    ui.add_space(3.0);
+    ui.label(
+        RichText::new(title)
+            .size(11.0 * text_scale)
+            .strong()
+            .color(COLOR_TEXT_MUTED),
     );
-    ui.add_space(4.0);
+    ui.add_space(1.0);
+    Frame::new()
+        .fill(COLOR_CARD_BG)
+        .stroke(Stroke::new(1.0_f32, COLOR_BORDER_SUBTLE))
+        .corner_radius(CornerRadius::same(8))
+        .inner_margin(Margin::same(12))
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing = egui::vec2(8.0 * text_scale, 8.0 * text_scale);
+            ui.vertical(add_contents).inner
+        })
+        .inner
 }
 
 fn warning_text(ui: &mut egui::Ui, text: &str, text_scale: f32) {
     ui.label(
         RichText::new(text)
-            .size(13.0 * text_scale)
-            .italics()
-            .color(COLOR_ACCENT),
+            .size(12.0 * text_scale)
+            .color(COLOR_WARNING),
     );
 }
 
@@ -629,21 +720,28 @@ fn fps_mode_combo(
         });
 }
 
-fn labeled_custom_fps(ui: &mut egui::Ui, draft: &mut Settings, max_fps: u32) {
-    ui.label(RichText::new("Custom FPS").color(COLOR_TEXT_SECONDARY));
+fn labeled_custom_fps(ui: &mut egui::Ui, draft: &mut Settings, max_fps: u32, text_scale: f32) {
     let effective_max = max_fps.min(MAX_FPS);
     ui.horizontal(|ui| {
-        if ui.small_button("-").clicked() {
-            draft.custom_fps = draft.custom_fps.saturating_sub(1).max(MIN_FPS);
-        }
         ui.label(
-            RichText::new(format!("{} FPS", draft.custom_fps))
-                .strong()
-                .color(COLOR_TEXT_PRIMARY),
+            RichText::new("Target FPS")
+                .size(12.0 * text_scale)
+                .color(COLOR_TEXT_SECONDARY),
         );
-        if ui.small_button("+").clicked() {
-            draft.custom_fps = draft.custom_fps.saturating_add(1).min(effective_max);
-        }
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if ui.button("+").clicked() {
+                draft.custom_fps = draft.custom_fps.saturating_add(1).min(effective_max);
+            }
+            ui.label(
+                RichText::new(format!("{} FPS", draft.custom_fps))
+                    .size(13.0 * text_scale)
+                    .strong()
+                    .color(COLOR_TEXT_PRIMARY),
+            );
+            if ui.button("-").clicked() {
+                draft.custom_fps = draft.custom_fps.saturating_sub(1).max(MIN_FPS);
+            }
+        });
     });
 }
 
@@ -665,28 +763,35 @@ fn labeled_audio_combo(
         });
 }
 
-fn labeled_volume(ui: &mut egui::Ui, draft: &mut Settings) {
-    ui.label(RichText::new("Volume").color(COLOR_TEXT_SECONDARY));
+fn labeled_volume(ui: &mut egui::Ui, draft: &mut Settings, text_scale: f32) {
     ui.horizontal(|ui| {
-        let mut volume_percent = (draft.volume.clamp(0.0, 1.0) * 100.0).round() as u32;
-        let slider = Slider::new(&mut volume_percent, 0..=100).show_value(false);
-        let changed = ui
-            .scope(|ui| {
-                let visuals = &mut ui.visuals_mut().widgets;
-                visuals.inactive.fg_stroke = Stroke::new(2.0_f32, COLOR_ACCENT);
-                visuals.hovered.fg_stroke = Stroke::new(2.0_f32, COLOR_ACCENT);
-                visuals.active.fg_stroke = Stroke::new(2.0_f32, COLOR_ACCENT);
-                ui.add(slider).changed()
-            })
-            .inner;
-        if changed {
-            draft.volume = (volume_percent as f64 / 100.0).clamp(0.0, 1.0);
-        }
         ui.label(
-            RichText::new(format!("{volume_percent}%"))
-                .color(COLOR_TEXT_PRIMARY)
-                .strong(),
+            RichText::new("Volume")
+                .size(12.0 * text_scale)
+                .color(COLOR_TEXT_SECONDARY),
         );
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            let mut volume_percent = (draft.volume.clamp(0.0, 1.0) * 100.0).round() as u32;
+            ui.label(
+                RichText::new(format!("{volume_percent}%"))
+                    .size(13.0 * text_scale)
+                    .color(COLOR_TEXT_PRIMARY)
+                    .strong(),
+            );
+            let slider = Slider::new(&mut volume_percent, 0..=100).show_value(false);
+            let changed = ui
+                .scope(|ui| {
+                    let visuals = &mut ui.visuals_mut().widgets;
+                    visuals.inactive.fg_stroke = Stroke::new(2.0_f32, COLOR_ACCENT);
+                    visuals.hovered.fg_stroke = Stroke::new(2.0_f32, COLOR_ACCENT_HOVER);
+                    visuals.active.fg_stroke = Stroke::new(2.0_f32, COLOR_ACCENT);
+                    ui.add(slider).changed()
+                })
+                .inner;
+            if changed {
+                draft.volume = (volume_percent as f64 / 100.0).clamp(0.0, 1.0);
+            }
+        });
     });
 }
 
@@ -696,9 +801,14 @@ fn picture_slider(
     val: &mut f32,
     range: std::ops::RangeInclusive<f32>,
     step: f64,
+    text_scale: f32,
 ) {
     ui.horizontal(|ui| {
-        ui.label(RichText::new(label).color(COLOR_TEXT_SECONDARY));
+        ui.label(
+            RichText::new(label)
+                .size(12.0 * text_scale)
+                .color(COLOR_TEXT_SECONDARY),
+        );
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             ui.add(Slider::new(val, range).step_by(step));
         });
@@ -707,26 +817,33 @@ fn picture_slider(
 
 fn styled_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
     ui.add(
-        Button::new(RichText::new(text).color(COLOR_TEXT_PRIMARY))
+        Button::new(RichText::new(text).color(COLOR_TEXT_PRIMARY).strong())
             .fill(COLOR_PANEL_BG)
-            .stroke(Stroke::new(1.0_f32, COLOR_BORDER)),
+            .stroke(Stroke::new(1.0_f32, COLOR_BORDER))
+            .corner_radius(CornerRadius::same(6))
+            .min_size(egui::vec2(0.0, 28.0)),
     )
 }
 
 fn exit_button(ui: &mut egui::Ui) -> egui::Response {
     ui.with_layout(Layout::top_down(Align::Center), |ui| {
         ui.add(
-            Button::new(RichText::new("Exit TackleCast").color(COLOR_TEXT_PRIMARY))
-                .fill(COLOR_EXIT_BG)
-                .stroke(Stroke::new(1.0_f32, COLOR_ACCENT))
-                .min_size(egui::vec2(ui.available_width(), 0.0)),
+            Button::new(
+                RichText::new("Exit TackleCast")
+                    .color(COLOR_EXIT_TEXT)
+                    .strong(),
+            )
+            .fill(COLOR_EXIT_BG)
+            .stroke(Stroke::new(1.0_f32, COLOR_EXIT_BORDER))
+            .corner_radius(CornerRadius::same(6))
+            .min_size(egui::vec2(ui.available_width(), 32.0)),
         )
     })
     .inner
 }
 
 fn menu_background() -> Color32 {
-    Color32::from_rgba_unmultiplied(12, 12, 28, 240)
+    Color32::from_rgba_unmultiplied(17, 19, 27, 248)
 }
 
 fn video_device_options(video_devices: &[String], current: &str) -> Vec<String> {
@@ -790,13 +907,6 @@ fn overlay_text(overlay: &OverlayInfo) -> Option<String> {
     }
 }
 
-fn spaced_caps(text: &str) -> String {
-    text.chars()
-        .map(|c| c.to_ascii_uppercase().to_string())
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -846,7 +956,7 @@ mod tests {
             return;
         }
 
-        let mut tab = MenuTab::General;
+        let mut tab = MenuTab::Video;
 
         // Frame 1: 1080p60 -> all formats supported by hardware should be available
         let _ = ctx.run(egui::RawInput::default(), |ctx| {
@@ -910,5 +1020,25 @@ mod tests {
         });
 
         assert_eq!(tab, MenuTab::Picture);
+    }
+
+    #[test]
+    fn test_menu_all_tabs_render() {
+        let ctx = egui::Context::default();
+        let mut draft = Settings::default();
+        let mut output = UiOutput::default();
+
+        for tab in [
+            MenuTab::Video,
+            MenuTab::Picture,
+            MenuTab::Audio,
+            MenuTab::Display,
+        ] {
+            let mut current_tab = tab;
+            let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                draw_menu(&ctx, &mut draft, &mut current_tab, &[], &[], &[], false, &mut output);
+            });
+            assert_eq!(current_tab, tab);
+        }
     }
 }
