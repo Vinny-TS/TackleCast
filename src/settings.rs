@@ -401,7 +401,7 @@ fn default_show_overlay() -> bool {
 }
 
 fn default_sharpness() -> f32 {
-    0.5
+    1.0
 }
 
 #[cfg(test)]

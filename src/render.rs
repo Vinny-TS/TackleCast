@@ -37,8 +37,7 @@ pub struct Renderer {
     sharpness: f32,
     video_frame: Option<VideoFrameResources>,
     egui_renderer: EguiRenderer,
-    upscale_pipelines: Option<UpscalePipelines>,
-    upscale_textures: Option<UpscaleTextures>,
+    upscale_manager: Option<UpscaleManager>,
     // Reusable scratch buffers to avoid per-frame allocations
     pad_scratch: Vec<u8>,
     nv12_u_scratch: Vec<u8>,
@@ -252,8 +251,7 @@ impl Renderer {
             sharpness,
             video_frame: None,
             egui_renderer,
-            upscale_pipelines: None,
-            upscale_textures: None,
+            upscale_manager: None,
             pad_scratch: Vec::new(),
             nv12_u_scratch: Vec::new(),
             nv12_v_scratch: Vec::new(),
@@ -281,7 +279,9 @@ impl Renderer {
     pub fn set_scale_filter(&mut self, filter: ScaleFilter) {
         self.scale_filter = filter;
         if filter != ScaleFilter::Fsr1 {
-            self.upscale_textures = None;
+            if let Some(mgr) = &mut self.upscale_manager {
+                mgr.clear_textures();
+            }
         }
     }
 
@@ -606,24 +606,27 @@ impl Renderer {
         if let (Some(video_frame), Some(viewport)) = (&self.video_frame, video_viewport) {
             let resolved_space = self.color_space.resolve(video_frame.width, video_frame.height);
             let resolved_range = self.color_range.resolve(video_frame.format);
+            let out_w = viewport.width.round().max(1.0) as u32;
+            let out_h = viewport.height.round().max(1.0) as u32;
+            // EASU is an edge-adaptive spatial upsampler designed for magnification (1x..4x).
+            // When the viewport is smaller than native capture resolution, running EASU causes
+            // aliasing due to undersampling. Guard against downscaling and fall back to bilinear.
+            let is_upscaling = out_w >= video_frame.width && out_h >= video_frame.height;
 
-            if self.scale_filter == ScaleFilter::Fsr1 {
-                let out_w = viewport.width.round().max(1.0) as u32;
-                let out_h = viewport.height.round().max(1.0) as u32;
-
-                Self::ensure_upscale_resources(
-                    &self.device,
-                    &self.video_bind_group_layout,
-                    self.surface_format,
-                    &mut self.upscale_pipelines,
-                    &mut self.upscale_textures,
+            if self.scale_filter == ScaleFilter::Fsr1 && is_upscaling {
+                let surface_format = self.surface_format;
+                let video_bind_group_layout = &self.video_bind_group_layout;
+                let device = &self.device;
+                let mgr = self.upscale_manager.get_or_insert_with(|| {
+                    UpscaleManager::new(device, video_bind_group_layout, surface_format)
+                });
+                let (pipelines, textures) = mgr.prepare_resources(
+                    device,
                     video_frame.width,
                     video_frame.height,
                     out_w,
                     out_h,
                 );
-                let pipelines = self.upscale_pipelines.as_ref().unwrap();
-                let textures = self.upscale_textures.as_ref().unwrap();
 
                 // 1:1 Bilinear conversion from YUV to native RGB
                 let yuv_uniforms = VideoUniforms {
@@ -637,7 +640,7 @@ impl Renderer {
                 self.queue
                     .write_buffer(&self.uniforms, 0, bytemuck::bytes_of(&yuv_uniforms));
 
-                let easu_con = calculate_easu_constants(
+                let easu_con = EasuConstants::new(
                     video_frame.width as f32,
                     video_frame.height as f32,
                     out_w as f32,
@@ -649,11 +652,11 @@ impl Renderer {
                     bytemuck::bytes_of(&easu_con),
                 );
 
-                let rcas_con = RcasConstants {
-                    con: [(self.sharpness * 0.5).clamp(0.0, 1.0), 0.0, 0.0, 0.0],
-                    output_size: [out_w as f32, out_h as f32],
-                    _pad: [0.0; 2],
-                };
+                let rcas_con = RcasConstants::new(
+                    self.sharpness,
+                    out_w as f32,
+                    out_h as f32,
+                );
                 self.queue.write_buffer(
                     &pipelines.rcas_uniforms,
                     0,
@@ -740,11 +743,20 @@ impl Renderer {
                     pass.draw(0..6, 0..1);
                 }
             } else {
-                self.upscale_textures = None;
+                if let Some(mgr) = &mut self.upscale_manager {
+                    mgr.clear_textures();
+                }
+
+                // If Fsr1 was selected but viewport is downscaling, fall back to Bilinear (0u)
+                let filter_mode = if self.scale_filter == ScaleFilter::Fsr1 {
+                    0
+                } else {
+                    self.scale_filter.as_u32()
+                };
 
                 let uniforms = VideoUniforms {
                     format_mode: VideoUniforms::format_mode_for(video_frame.format),
-                    filter_mode: self.scale_filter.as_u32(),
+                    filter_mode,
                     color_space: resolved_space.as_u32(),
                     color_range: resolved_range.as_u32(),
                     viewport_size: [viewport.width, viewport.height],
@@ -829,331 +841,6 @@ impl Renderer {
         frame.present();
         Ok(())
     }
-
-    fn ensure_upscale_resources(
-        device: &wgpu::Device,
-        video_bind_group_layout: &wgpu::BindGroupLayout,
-        surface_format: wgpu::TextureFormat,
-        upscale_pipelines: &mut Option<UpscalePipelines>,
-        upscale_textures: &mut Option<UpscaleTextures>,
-        video_width: u32,
-        video_height: u32,
-        out_width: u32,
-        out_height: u32,
-    ) {
-        if upscale_pipelines.is_none() {
-            *upscale_pipelines = Some(Self::create_upscale_pipelines(
-                device,
-                video_bind_group_layout,
-                surface_format,
-            ));
-        }
-
-        let needs_texture_rebuild = match upscale_textures.as_ref() {
-            Some(tex) => {
-                tex.native_width != video_width
-                    || tex.native_height != video_height
-                    || tex.easu_width != out_width
-                    || tex.easu_height != out_height
-            }
-            None => true,
-        };
-
-        if needs_texture_rebuild {
-            let pipelines = upscale_pipelines.as_ref().unwrap();
-            *upscale_textures = Some(Self::create_upscale_textures(
-                device,
-                pipelines,
-                video_width,
-                video_height,
-                out_width,
-                out_height,
-            ));
-        }
-    }
-
-    fn create_upscale_pipelines(
-        device: &wgpu::Device,
-        video_bind_group_layout: &wgpu::BindGroupLayout,
-        surface_format: wgpu::TextureFormat,
-    ) -> UpscalePipelines {
-        let video_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("tacklecast-video-shader-intermediate"),
-            source: wgpu::ShaderSource::Wgsl(VIDEO_SHADER.into()),
-        });
-        let video_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("tacklecast-video-intermediate-pipeline-layout"),
-            bind_group_layouts: &[video_bind_group_layout],
-            push_constant_ranges: &[],
-        });
-        let yuv_to_rgb_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("tacklecast-yuv-to-rgb-pipeline"),
-            layout: Some(&video_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &video_shader,
-                entry_point: Some("vs_main"),
-                buffers: &[],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &video_shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: wgpu::TextureFormat::Rgba8Unorm,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            }),
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview: None,
-            cache: None,
-        });
-
-        let easu_bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("tacklecast-fsr-easu-bind-group-layout"),
-                entries: &[
-                    texture_layout_entry(0),
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 2,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                ],
-            });
-
-        let easu_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("tacklecast-fsr-easu-shader"),
-            source: wgpu::ShaderSource::Wgsl(EASU_SHADER.into()),
-        });
-
-        let easu_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("tacklecast-fsr-easu-pipeline-layout"),
-            bind_group_layouts: &[&easu_bind_group_layout],
-            push_constant_ranges: &[],
-        });
-
-        let easu_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("tacklecast-fsr-easu-pipeline"),
-            layout: Some(&easu_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &easu_shader,
-                entry_point: Some("vs_main"),
-                buffers: &[],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &easu_shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: wgpu::TextureFormat::Rgba8Unorm,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            }),
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview: None,
-            cache: None,
-        });
-
-        let rcas_bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("tacklecast-fsr-rcas-bind-group-layout"),
-                entries: &[
-                    texture_layout_entry(0),
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                ],
-            });
-
-        let rcas_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("tacklecast-fsr-rcas-shader"),
-            source: wgpu::ShaderSource::Wgsl(RCAS_SHADER.into()),
-        });
-
-        let rcas_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("tacklecast-fsr-rcas-pipeline-layout"),
-            bind_group_layouts: &[&rcas_bind_group_layout],
-            push_constant_ranges: &[],
-        });
-
-        let rcas_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("tacklecast-fsr-rcas-pipeline"),
-            layout: Some(&rcas_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &rcas_shader,
-                entry_point: Some("vs_main"),
-                buffers: &[],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &rcas_shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: surface_format,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            }),
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview: None,
-            cache: None,
-        });
-
-        let easu_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("tacklecast-fsr-easu-sampler"),
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::FilterMode::Nearest,
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            address_mode_w: wgpu::AddressMode::ClampToEdge,
-            ..Default::default()
-        });
-
-        let easu_uniforms = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("tacklecast-fsr-easu-uniforms"),
-            size: std::mem::size_of::<EasuConstants>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        let rcas_uniforms = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("tacklecast-fsr-rcas-uniforms"),
-            size: std::mem::size_of::<RcasConstants>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        UpscalePipelines {
-            yuv_to_rgb_pipeline,
-            easu_pipeline,
-            rcas_pipeline,
-            easu_bind_group_layout,
-            rcas_bind_group_layout,
-            easu_sampler,
-            easu_uniforms,
-            rcas_uniforms,
-        }
-    }
-
-    fn create_upscale_textures(
-        device: &wgpu::Device,
-        pipelines: &UpscalePipelines,
-        native_width: u32,
-        native_height: u32,
-        easu_width: u32,
-        easu_height: u32,
-    ) -> UpscaleTextures {
-        let native_rgb_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("tacklecast-fsr-native-rgb-texture"),
-            size: wgpu::Extent3d {
-                width: native_width.max(1),
-                height: native_height.max(1),
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-        let native_rgb_view =
-            native_rgb_texture.create_view(&wgpu::TextureViewDescriptor::default());
-
-        let easu_output_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("tacklecast-fsr-easu-output-texture"),
-            size: wgpu::Extent3d {
-                width: easu_width.max(1),
-                height: easu_height.max(1),
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-        let easu_output_view =
-            easu_output_texture.create_view(&wgpu::TextureViewDescriptor::default());
-
-        let easu_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("tacklecast-fsr-easu-bind-group"),
-            layout: &pipelines.easu_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&native_rgb_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&pipelines.easu_sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: pipelines.easu_uniforms.as_entire_binding(),
-                },
-            ],
-        });
-
-        let rcas_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("tacklecast-fsr-rcas-bind-group"),
-            layout: &pipelines.rcas_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&easu_output_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: pipelines.rcas_uniforms.as_entire_binding(),
-                },
-            ],
-        });
-
-        UpscaleTextures {
-            native_rgb_texture,
-            native_rgb_view,
-            native_width,
-            native_height,
-            easu_output_texture,
-            easu_output_view,
-            easu_width,
-            easu_height,
-            easu_bind_group,
-            rcas_bind_group,
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -1211,6 +898,43 @@ struct EasuConstants {
     con3: [f32; 4],
 }
 
+impl EasuConstants {
+    /// Computes the EASU setup constants according to the AMD FSR 1.0 specification.
+    ///
+    /// - `con0`: Scaling ratio (`in / out`) and sub-pixel sampling offsets
+    /// - `con1`: Normalized input texel size (`1 / in`)
+    /// - `con2`: Half and full pixel offsets for 12-tap kernel gathering
+    /// - `con3`: Kernel step size and output viewport dimensions
+    pub fn new(in_w: f32, in_h: f32, out_w: f32, out_h: f32) -> Self {
+        Self {
+            con0: [
+                in_w / out_w,
+                in_h / out_h,
+                0.5 * in_w / out_w - 0.5,
+                0.5 * in_h / out_h - 0.5,
+            ],
+            con1: [
+                1.0 / in_w,
+                1.0 / in_h,
+                1.0 / in_w,
+                -1.0 / in_h,
+            ],
+            con2: [
+                -1.0 / in_w,
+                2.0 / in_h,
+                1.0 / in_w,
+                2.0 / in_h,
+            ],
+            con3: [
+                0.0,
+                4.0 / in_h,
+                out_w,
+                out_h,
+            ],
+        }
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Debug, PartialEq)]
 struct RcasConstants {
@@ -1219,37 +943,17 @@ struct RcasConstants {
     _pad: [f32; 2],
 }
 
-fn calculate_easu_constants(
-    in_w: f32,
-    in_h: f32,
-    out_w: f32,
-    out_h: f32,
-) -> EasuConstants {
-    EasuConstants {
-        con0: [
-            in_w / out_w,
-            in_h / out_h,
-            0.5 * in_w / out_w - 0.5,
-            0.5 * in_h / out_h - 0.5,
-        ],
-        con1: [
-            1.0 / in_w,
-            1.0 / in_h,
-            1.0 / in_w,
-            -1.0 / in_h,
-        ],
-        con2: [
-            -1.0 / in_w,
-            2.0 / in_h,
-            1.0 / in_w,
-            2.0 / in_h,
-        ],
-        con3: [
-            0.0,
-            4.0 / in_h,
-            out_w,
-            out_h,
-        ],
+impl RcasConstants {
+    /// Computes the RCAS sharpening constants according to the AMD FSR 1.0 specification.
+    ///
+    /// - `sharpness`: Attenuation factor (0.0 to 2.0, mapped to kernel lobe multiplier)
+    /// - `out_w`, `out_h`: Destination viewport dimensions for texel loading
+    pub fn new(sharpness: f32, out_w: f32, out_h: f32) -> Self {
+        Self {
+            con: [(sharpness * 0.5).clamp(0.0, 1.0), 0.0, 0.0, 0.0],
+            output_size: [out_w, out_h],
+            _pad: [0.0; 2],
+        }
     }
 }
 
@@ -1278,6 +982,348 @@ struct UpscaleTextures {
 
     easu_bind_group: wgpu::BindGroup,
     rcas_bind_group: wgpu::BindGroup,
+}
+
+struct UpscaleManager {
+    pipelines: UpscalePipelines,
+    textures: Option<UpscaleTextures>,
+}
+
+impl UpscaleManager {
+    fn new(
+        device: &wgpu::Device,
+        video_bind_group_layout: &wgpu::BindGroupLayout,
+        surface_format: wgpu::TextureFormat,
+    ) -> Self {
+        Self {
+            pipelines: create_upscale_pipelines(device, video_bind_group_layout, surface_format),
+            textures: None,
+        }
+    }
+
+    fn prepare_resources(
+        &mut self,
+        device: &wgpu::Device,
+        native_width: u32,
+        native_height: u32,
+        out_width: u32,
+        out_height: u32,
+    ) -> (&UpscalePipelines, &UpscaleTextures) {
+        let needs_texture_rebuild = match self.textures.as_ref() {
+            Some(tex) => {
+                tex.native_width != native_width
+                    || tex.native_height != native_height
+                    || tex.easu_width != out_width
+                    || tex.easu_height != out_height
+            }
+            None => true,
+        };
+
+        if needs_texture_rebuild {
+            self.textures = Some(create_upscale_textures(
+                device,
+                &self.pipelines,
+                native_width,
+                native_height,
+                out_width,
+                out_height,
+            ));
+        }
+
+        (&self.pipelines, self.textures.as_ref().unwrap())
+    }
+
+    fn clear_textures(&mut self) {
+        self.textures = None;
+    }
+}
+
+fn create_upscale_pipelines(
+    device: &wgpu::Device,
+    video_bind_group_layout: &wgpu::BindGroupLayout,
+    surface_format: wgpu::TextureFormat,
+) -> UpscalePipelines {
+    let video_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("tacklecast-video-shader-intermediate"),
+        source: wgpu::ShaderSource::Wgsl(VIDEO_SHADER.into()),
+    });
+    let video_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("tacklecast-video-intermediate-pipeline-layout"),
+        bind_group_layouts: &[video_bind_group_layout],
+        push_constant_ranges: &[],
+    });
+    let yuv_to_rgb_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("tacklecast-yuv-to-rgb-pipeline"),
+        layout: Some(&video_pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: &video_shader,
+            entry_point: Some("vs_main"),
+            buffers: &[],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &video_shader,
+            entry_point: Some("fs_main"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                blend: Some(wgpu::BlendState::REPLACE),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        }),
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+        cache: None,
+    });
+
+    let quad_vertex_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("tacklecast-quad-vertex-shader"),
+        source: wgpu::ShaderSource::Wgsl(QUAD_VERTEX_SHADER.into()),
+    });
+
+    let easu_bind_group_layout =
+        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("tacklecast-fsr-easu-bind-group-layout"),
+            entries: &[
+                texture_layout_entry(0),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+    let easu_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("tacklecast-fsr-easu-shader"),
+        source: wgpu::ShaderSource::Wgsl(EASU_SHADER.into()),
+    });
+
+    let easu_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("tacklecast-fsr-easu-pipeline-layout"),
+        bind_group_layouts: &[&easu_bind_group_layout],
+        push_constant_ranges: &[],
+    });
+
+    let easu_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("tacklecast-fsr-easu-pipeline"),
+        layout: Some(&easu_pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: &quad_vertex_shader,
+            entry_point: Some("vs_main"),
+            buffers: &[],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &easu_shader,
+            entry_point: Some("fs_main"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                blend: Some(wgpu::BlendState::REPLACE),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        }),
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+        cache: None,
+    });
+
+    let rcas_bind_group_layout =
+        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("tacklecast-fsr-rcas-bind-group-layout"),
+            entries: &[
+                texture_layout_entry(0),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+    let rcas_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("tacklecast-fsr-rcas-shader"),
+        source: wgpu::ShaderSource::Wgsl(RCAS_SHADER.into()),
+    });
+
+    let rcas_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("tacklecast-fsr-rcas-pipeline-layout"),
+        bind_group_layouts: &[&rcas_bind_group_layout],
+        push_constant_ranges: &[],
+    });
+
+    let rcas_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("tacklecast-fsr-rcas-pipeline"),
+        layout: Some(&rcas_pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: &quad_vertex_shader,
+            entry_point: Some("vs_main"),
+            buffers: &[],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &rcas_shader,
+            entry_point: Some("fs_main"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: surface_format,
+                blend: Some(wgpu::BlendState::REPLACE),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        }),
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+        cache: None,
+    });
+
+    let easu_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("tacklecast-fsr-easu-sampler"),
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        mipmap_filter: wgpu::FilterMode::Nearest,
+        address_mode_u: wgpu::AddressMode::ClampToEdge,
+        address_mode_v: wgpu::AddressMode::ClampToEdge,
+        address_mode_w: wgpu::AddressMode::ClampToEdge,
+        ..Default::default()
+    });
+
+    let easu_uniforms = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("tacklecast-fsr-easu-uniforms"),
+        size: std::mem::size_of::<EasuConstants>() as u64,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    let rcas_uniforms = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("tacklecast-fsr-rcas-uniforms"),
+        size: std::mem::size_of::<RcasConstants>() as u64,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    UpscalePipelines {
+        yuv_to_rgb_pipeline,
+        easu_pipeline,
+        rcas_pipeline,
+        easu_bind_group_layout,
+        rcas_bind_group_layout,
+        easu_sampler,
+        easu_uniforms,
+        rcas_uniforms,
+    }
+}
+
+fn create_upscale_textures(
+    device: &wgpu::Device,
+    pipelines: &UpscalePipelines,
+    native_width: u32,
+    native_height: u32,
+    easu_width: u32,
+    easu_height: u32,
+) -> UpscaleTextures {
+    let native_rgb_texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("tacklecast-fsr-native-rgb-texture"),
+        size: wgpu::Extent3d {
+            width: native_width.max(1),
+            height: native_height.max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let native_rgb_view =
+        native_rgb_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+    let easu_output_texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("tacklecast-fsr-easu-output-texture"),
+        size: wgpu::Extent3d {
+            width: easu_width.max(1),
+            height: easu_height.max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let easu_output_view =
+        easu_output_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+    let easu_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("tacklecast-fsr-easu-bind-group"),
+        layout: &pipelines.easu_bind_group_layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&native_rgb_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(&pipelines.easu_sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: pipelines.easu_uniforms.as_entire_binding(),
+            },
+        ],
+    });
+
+    let rcas_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("tacklecast-fsr-rcas-bind-group"),
+        layout: &pipelines.rcas_bind_group_layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&easu_output_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: pipelines.rcas_uniforms.as_entire_binding(),
+            },
+        ],
+    });
+
+    UpscaleTextures {
+        native_rgb_texture,
+        native_rgb_view,
+        native_width,
+        native_height,
+        easu_output_texture,
+        easu_output_view,
+        easu_width,
+        easu_height,
+        easu_bind_group,
+        rcas_bind_group,
+    }
 }
 
 struct VideoFrameResources {
@@ -1521,7 +1567,7 @@ mod tests {
 
     #[test]
     fn easu_constants_calculation() {
-        let con = calculate_easu_constants(1920.0, 1080.0, 3840.0, 2160.0);
+        let con = EasuConstants::new(1920.0, 1080.0, 3840.0, 2160.0);
         assert!((con.con0[0] - 0.5).abs() < 1e-6);
         assert!((con.con0[1] - 0.5).abs() < 1e-6);
         assert!((con.con0[2] - (-0.25)).abs() < 1e-6);
@@ -1530,6 +1576,14 @@ mod tests {
         assert!((con.con1[1] - (1.0 / 1080.0)).abs() < 1e-6);
         assert_eq!(con.con3[2], 3840.0);
         assert_eq!(con.con3[3], 2160.0);
+    }
+
+    #[test]
+    fn rcas_constants_calculation() {
+        let con = RcasConstants::new(1.0, 3840.0, 2160.0);
+        assert!((con.con[0] - 0.5).abs() < 1e-6);
+        assert_eq!(con.output_size[0], 3840.0);
+        assert_eq!(con.output_size[1], 2160.0);
     }
 }
 
@@ -1860,18 +1914,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
 }
 "#;
 
-const EASU_SHADER: &str = r#"
-struct EasuConstants {
-    con0: vec4<f32>,
-    con1: vec4<f32>,
-    con2: vec4<f32>,
-    con3: vec4<f32>,
-};
-
-@group(0) @binding(0) var easu_tex: texture_2d<f32>;
-@group(0) @binding(1) var easu_sampler: sampler;
-@group(0) @binding(2) var<uniform> easu_con: EasuConstants;
-
+const QUAD_VERTEX_SHADER: &str = r#"
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) uv: vec2<f32>,
@@ -1900,6 +1943,24 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
     out.uv = uvs[vertex_index];
     return out;
 }
+"#;
+
+const EASU_SHADER: &str = r#"
+struct EasuConstants {
+    con0: vec4<f32>,
+    con1: vec4<f32>,
+    con2: vec4<f32>,
+    con3: vec4<f32>,
+};
+
+@group(0) @binding(0) var easu_tex: texture_2d<f32>;
+@group(0) @binding(1) var easu_sampler: sampler;
+@group(0) @binding(2) var<uniform> easu_con: EasuConstants;
+
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
 
 fn FsrEasuTapF(
     aC: ptr<function, vec3<f32>>,
@@ -2078,30 +2139,6 @@ struct VertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) uv: vec2<f32>,
 };
-
-@vertex
-fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
-    var positions = array<vec2<f32>, 6>(
-        vec2<f32>(-1.0, -1.0),
-        vec2<f32>( 1.0, -1.0),
-        vec2<f32>(-1.0,  1.0),
-        vec2<f32>(-1.0,  1.0),
-        vec2<f32>( 1.0, -1.0),
-        vec2<f32>( 1.0,  1.0),
-    );
-    var uvs = array<vec2<f32>, 6>(
-        vec2<f32>(0.0, 1.0),
-        vec2<f32>(1.0, 1.0),
-        vec2<f32>(0.0, 0.0),
-        vec2<f32>(0.0, 0.0),
-        vec2<f32>(1.0, 1.0),
-        vec2<f32>(1.0, 0.0),
-    );
-    var out: VertexOutput;
-    out.position = vec4<f32>(positions[vertex_index], 0.0, 1.0);
-    out.uv = uvs[vertex_index];
-    return out;
-}
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
