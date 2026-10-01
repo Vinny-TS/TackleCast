@@ -26,3 +26,8 @@ logs/
 
 # Launcher exe (built locally)
 TackleCast.exe
+
+# Agent metadata
+.agents/
+skills-lock.json
+
