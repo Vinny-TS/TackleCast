@@ -219,8 +219,9 @@ fn gpu_shader_color_and_picture_reference() {
 #[ignore = "requires a working wgpu adapter; run explicitly on desktop test machines"]
 fn gpu_fsr_rcas_neutral_and_strong_reference() {
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
-    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
-        .expect("A wgpu adapter is required for this explicit graphics test");
+    let adapter =
+        pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+            .expect("A wgpu adapter is required for this explicit graphics test");
     let (device, queue) =
         pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default(), None))
             .unwrap();
@@ -511,10 +512,10 @@ fn gpu_fsr_rcas_neutral_and_strong_reference() {
         let data = readback_buffer.slice(..).get_mapped_range();
         // At row 1 (the dark side of transition), neighbor below is bright (192).
         // Sharpening subtracts neighbor weight, darkening the edge below 64!
-        let row1_r = data[(1 * 256 + 1 * 4) as usize];
+        let row1_r = data[256 + 4];
         // At row 2 (the bright side of transition), neighbor above is dark (64).
         // Sharpening boosts the center above 192!
-        let row2_r = data[(2 * 256 + 1 * 4) as usize];
+        let row2_r = data[2 * 256 + 4];
 
         assert!(
             row1_r < 64 || row2_r > 192,

@@ -756,18 +756,12 @@ impl Renderer {
                     out_w as f32,
                     out_h as f32,
                 );
-                self.queue.write_buffer(
-                    &pipelines.easu_uniforms,
-                    0,
-                    bytemuck::bytes_of(&easu_con),
-                );
+                self.queue
+                    .write_buffer(&pipelines.easu_uniforms, 0, bytemuck::bytes_of(&easu_con));
 
                 let rcas_con = RcasConstants::new(self.sharpness, out_w as f32, out_h as f32);
-                self.queue.write_buffer(
-                    &pipelines.rcas_uniforms,
-                    0,
-                    bytemuck::bytes_of(&rcas_con),
-                );
+                self.queue
+                    .write_buffer(&pipelines.rcas_uniforms, 0, bytemuck::bytes_of(&rcas_con));
 
                 // Pass 1: YUV -> RGB native resolution texture
                 {
@@ -969,6 +963,7 @@ impl Renderer {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn ensure_upscale_resources(
         device: &wgpu::Device,
         video_bind_group_layout: &wgpu::BindGroupLayout,
@@ -1020,11 +1015,12 @@ impl Renderer {
             label: Some("tacklecast-video-shader-intermediate"),
             source: wgpu::ShaderSource::Wgsl(VIDEO_SHADER.into()),
         });
-        let video_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("tacklecast-video-intermediate-pipeline-layout"),
-            bind_group_layouts: &[video_bind_group_layout],
-            push_constant_ranges: &[],
-        });
+        let video_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("tacklecast-video-intermediate-pipeline-layout"),
+                bind_group_layouts: &[video_bind_group_layout],
+                push_constant_ranges: &[],
+            });
         let yuv_to_rgb_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("tacklecast-yuv-to-rgb-pipeline"),
             layout: Some(&video_pipeline_layout),
@@ -1576,12 +1572,7 @@ impl RcasConstants {
     }
 }
 
-pub fn calculate_easu_constants(
-    in_w: f32,
-    in_h: f32,
-    out_w: f32,
-    out_h: f32,
-) -> EasuConstants {
+pub fn calculate_easu_constants(in_w: f32, in_h: f32, out_w: f32, out_h: f32) -> EasuConstants {
     EasuConstants {
         con0: [
             in_w / out_w,
@@ -1589,24 +1580,9 @@ pub fn calculate_easu_constants(
             0.5 * in_w / out_w - 0.5,
             0.5 * in_h / out_h - 0.5,
         ],
-        con1: [
-            1.0 / in_w,
-            1.0 / in_h,
-            1.0 / in_w,
-            -1.0 / in_h,
-        ],
-        con2: [
-            -1.0 / in_w,
-            2.0 / in_h,
-            1.0 / in_w,
-            2.0 / in_h,
-        ],
-        con3: [
-            0.0,
-            4.0 / in_h,
-            out_w,
-            out_h,
-        ],
+        con1: [1.0 / in_w, 1.0 / in_h, 1.0 / in_w, -1.0 / in_h],
+        con2: [-1.0 / in_w, 2.0 / in_h, 1.0 / in_w, 2.0 / in_h],
+        con3: [0.0, 4.0 / in_h, out_w, out_h],
     }
 }
 
