@@ -56,6 +56,7 @@ pub struct OverlayInfo {
     pub height: Option<u32>,
     pub fps: Option<f32>,
     pub filter: ScaleFilter,
+    pub filter_label: String,
     pub color_space: ColorSpace,
     pub color_range: ColorRange,
     pub active_format: Option<String>,
@@ -165,6 +166,7 @@ impl UiState {
                 overlay.color_space = self.draft_settings.color_space;
                 overlay.color_range = self.draft_settings.color_range;
                 overlay.filter = self.draft_settings.scaling_filter;
+                overlay.filter_label = self.draft_settings.scaling_filter.to_string();
             }
             draw_overlay(ctx, &overlay);
         });
@@ -295,7 +297,7 @@ fn draw_menu(
         .show(ctx, |ui| {
             Frame::new()
                 .fill(menu_background())
-                .stroke(Stroke::new(1.0, COLOR_MENU_BORDER))
+                .stroke(Stroke::new(1.0_f32, COLOR_MENU_BORDER))
                 .corner_radius(CornerRadius::same(12))
                 .inner_margin(Margin::same(18))
                 .show(ui, |ui| {
@@ -405,6 +407,16 @@ fn draw_menu(
                                                     &mut draft.scaling_filter,
                                                 );
                                             });
+                                            if draft.scaling_filter == ScaleFilter::Fsr1 {
+                                                output.slider_active |= picture_slider(
+                                                    ui,
+                                                    "Sharpness",
+                                                    &mut draft.sharpness,
+                                                    0.0..=2.0,
+                                                    0.05,
+                                                    text_scale,
+                                                );
+                                            }
                                             // Color overrides affect the active picture immediately.
                                             color_space_combo(
                                                 ui,
@@ -939,7 +951,7 @@ fn overlay_text(overlay: &OverlayInfo) -> Option<String> {
             if overlay.detailed {
                 format!(
                     "{width}x{height}{fmt_suffix}\n{} | {} {}\n{fps:.1} delivered FPS",
-                    overlay.filter,
+                    overlay.filter_label,
                     overlay.color_info.space_label(overlay.color_space, height),
                     overlay.color_info.range_label(overlay.color_range)
                 )

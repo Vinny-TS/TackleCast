@@ -407,6 +407,7 @@ impl ApplicationHandler<AppEvent> for App {
         let renderer = match pollster::block_on(Renderer::new(
             window.clone(),
             self.settings.scaling_filter,
+            self.settings.sharpness,
             self.settings.color_space,
             self.settings.color_range,
             self.settings.brightness,
@@ -551,6 +552,7 @@ impl ApplicationHandler<AppEvent> for App {
                         );
                         renderer.set_color_settings(live.color_space, live.color_range);
                         renderer.set_scale_filter(live.scaling_filter);
+                        renderer.set_sharpness(live.sharpness);
                     }
                     self.next_ui_redraw =
                         Instant::now().checked_add(prepared_ui.output.repaint_after);
@@ -743,6 +745,7 @@ impl App {
 
         if let Some(renderer) = &mut self.renderer {
             renderer.set_scale_filter(self.settings.scaling_filter);
+            renderer.set_sharpness(self.settings.sharpness);
             renderer.set_color_settings(self.settings.color_space, self.settings.color_range);
             renderer.set_picture_settings(
                 self.settings.brightness,
@@ -775,6 +778,12 @@ impl App {
                 .as_ref()
                 .map(Renderer::scale_filter)
                 .unwrap_or(self.settings.scaling_filter),
+            filter_label: self
+                .renderer
+                .as_ref()
+                .map(Renderer::active_scale_filter_label)
+                .map(str::to_string)
+                .unwrap_or_else(|| self.settings.scaling_filter.to_string()),
             color_space: self.settings.color_space,
             color_range: self.settings.color_range,
             color_info: self

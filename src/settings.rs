@@ -52,6 +52,8 @@ pub struct Settings {
     pub saturation: f32,
     #[serde(default = "default_gamma")]
     pub gamma: f32,
+    #[serde(default = "default_sharpness")]
+    pub sharpness: f32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -120,10 +122,10 @@ impl Display for VideoFormat {
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum ScaleFilter {
-    #[serde(alias = "fsr1")]
     Bilinear,
     Bicubic,
     Lanczos,
+    Fsr1,
 }
 
 impl ScaleFilter {
@@ -134,11 +136,12 @@ impl ScaleFilter {
             Self::Bilinear => 0,
             Self::Bicubic => 1,
             Self::Lanczos => 2,
+            Self::Fsr1 => 3,
         }
     }
 
     /// Every variant, in menu order.
-    pub const ALL: [Self; 3] = [Self::Bilinear, Self::Bicubic, Self::Lanczos];
+    pub const ALL: [Self; 4] = [Self::Bilinear, Self::Bicubic, Self::Lanczos, Self::Fsr1];
 }
 
 impl Display for ScaleFilter {
@@ -147,6 +150,7 @@ impl Display for ScaleFilter {
             Self::Bilinear => f.write_str("Bilinear"),
             Self::Bicubic => f.write_str("Bicubic"),
             Self::Lanczos => f.write_str("Lanczos"),
+            Self::Fsr1 => f.write_str("FSR 1.0"),
         }
     }
 }
@@ -244,6 +248,7 @@ impl Default for Settings {
             contrast: default_contrast(),
             saturation: default_saturation(),
             gamma: default_gamma(),
+            sharpness: default_sharpness(),
         }
     }
 }
@@ -283,6 +288,7 @@ impl Settings {
         self.contrast = finite(self.contrast, 1.0, 0.0, 2.0);
         self.saturation = finite(self.saturation, 1.0, 0.0, 2.0);
         self.gamma = finite(self.gamma, 1.0, 0.2, 3.0);
+        self.sharpness = finite(self.sharpness, 1.0, 0.0, 2.0);
         self.volume = if self.volume.is_finite() {
             self.volume.clamp(0.0, 1.0)
         } else {
@@ -395,6 +401,10 @@ fn default_saturation() -> f32 {
 }
 
 fn default_gamma() -> f32 {
+    1.0
+}
+
+fn default_sharpness() -> f32 {
     1.0
 }
 
@@ -563,7 +573,8 @@ mod tests {
         );
         let restored: Settings =
             serde_json::from_str(r#"{"scaling_filter":"fsr1","brightness":0.1}"#).unwrap();
-        assert_eq!(restored.scaling_filter, ScaleFilter::Bilinear);
+        assert_eq!(restored.scaling_filter, ScaleFilter::Fsr1);
         assert_eq!(restored.brightness, 0.1);
+        assert_eq!(restored.sharpness, 1.0);
     }
 }
