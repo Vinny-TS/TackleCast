@@ -479,17 +479,31 @@ fn draw_menu(
                                     }
                                     MenuTab::Audio => {
                                         card_section(ui, "DEVICE ROUTING", text_scale, |ui| {
+                                            let dshow_option = if cfg!(target_os = "windows")
+                                                && !draft.video_device.is_empty()
+                                            {
+                                                Some(format!(
+                                                    "DirectShow: {}",
+                                                    crate::devices::video_device_label(
+                                                        &draft.video_device
+                                                    )
+                                                ))
+                                            } else {
+                                                None
+                                            };
                                             labeled_audio_combo(
                                                 ui,
                                                 "Input Device",
                                                 &mut draft.audio_input,
                                                 frame.audio_inputs,
+                                                dshow_option.as_deref(),
                                             );
                                             labeled_audio_combo(
                                                 ui,
                                                 "Output Device",
                                                 &mut draft.audio_output,
                                                 frame.audio_outputs,
+                                                None,
                                             );
                                         });
                                         card_section(ui, "PLAYBACK VOLUME", text_scale, |ui| {
@@ -782,13 +796,21 @@ fn labeled_audio_combo(
     label: &str,
     selected: &mut i32,
     devices: &[AudioDevice],
+    dshow_option: Option<&str>,
 ) {
     ui.label(RichText::new(label).color(COLOR_TEXT_SECONDARY));
     ComboBox::from_id_salt(label)
         .width(ui.available_width())
-        .selected_text(audio_device_name(*selected, devices))
+        .selected_text(audio_device_name(*selected, devices, dshow_option))
         .show_ui(ui, |ui| {
             ui.selectable_value(selected, -1, "Default");
+            if let Some(dshow_label) = dshow_option {
+                ui.selectable_value(
+                    selected,
+                    crate::devices::DIRECTSHOW_AUDIO_INDEX,
+                    dshow_label,
+                );
+            }
             for device in devices {
                 ui.selectable_value(selected, device.index, device.name.clone());
             }
@@ -914,7 +936,12 @@ fn display_or_default(value: &str) -> String {
     }
 }
 
-fn audio_device_name(index: i32, devices: &[AudioDevice]) -> String {
+fn audio_device_name(index: i32, devices: &[AudioDevice], dshow_option: Option<&str>) -> String {
+    if index == crate::devices::DIRECTSHOW_AUDIO_INDEX {
+        return dshow_option
+            .unwrap_or("DirectShow: Capture Device")
+            .to_string();
+    }
     if index < 0 {
         return "Default".to_string();
     }

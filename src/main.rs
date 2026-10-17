@@ -429,8 +429,8 @@ impl ApplicationHandler<AppEvent> for App {
         self.ui = Some(ui);
         self.window = Some(window);
 
-        self.start_capture();
         self.start_audio();
+        self.start_capture();
 
         if let Some(window) = &self.window {
             window.request_redraw();
@@ -724,14 +724,13 @@ impl App {
 
         let mute_changed = old_settings.audio_muted != self.settings.audio_muted;
 
-        if video_changed {
-            if let Some(capture) = &mut self.capture {
-                capture.stop();
-            }
-            self.start_capture();
-        }
-
+        let was_dshow = self.audio.directshow_sink().is_some();
         if audio_device_changed {
+            if was_dshow {
+                if let Some(mut capture) = self.capture.take() {
+                    capture.stop();
+                }
+            }
             self.audio.stop();
             self.start_audio();
         } else {
@@ -741,6 +740,14 @@ impl App {
             if mute_changed {
                 self.audio.set_muted(self.settings.audio_muted);
             }
+        }
+        let now_dshow = self.audio.directshow_sink().is_some();
+
+        if video_changed || (audio_device_changed && (was_dshow || now_dshow)) {
+            if let Some(mut capture) = self.capture.take() {
+                capture.stop();
+            }
+            self.start_capture();
         }
 
         if let Some(renderer) = &mut self.renderer {
@@ -880,6 +887,7 @@ impl App {
                     #[cfg(all(target_os = "windows", feature = "gpu-decode"))]
                     shared_gpu_handles,
                 },
+                audio_sink: self.audio.directshow_sink(),
             },
             self.event_proxy.clone(),
         ));
@@ -911,6 +919,7 @@ impl App {
                     alternate_formats,
                     force_format,
                 },
+                audio_sink: None,
             },
             self.event_proxy.clone(),
         ));
