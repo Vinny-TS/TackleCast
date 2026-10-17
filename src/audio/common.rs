@@ -26,6 +26,20 @@ impl std::fmt::Display for AudioStatus {
     }
 }
 
+#[derive(Clone)]
+pub struct DirectShowAudioSink {
+    pub ring: Arc<AudioRingBuffer>,
+    pub target_sample_rate: u32,
+    pub target_channels: u16,
+    pub diagnostics: Arc<AudioDiagnostics>,
+}
+
+pub enum ResolvedInput {
+    Device(cpal::Device),
+    #[allow(dead_code)]
+    DirectShow(String),
+}
+
 /// Metadata about an active audio stream (for logging and UI inspection).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AudioStreamInfo {
